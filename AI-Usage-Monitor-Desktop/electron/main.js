@@ -1,14 +1,17 @@
-const { app, BrowserWindow } = require('electron')
+const { app, BrowserWindow, ipcMain } = require('electron')
 const path = require('path')
 
 function createWindow() {
   const win = new BrowserWindow({
-    width: 800,
-    height: 600,
+    width: 940,
+    height: 700,
+    minWidth: 600,
+    minHeight: 420,
+    frame: false, 
     webPreferences: {
-      nodeIntegration: false,      // 安全
-      contextIsolation: true,      // 安全
-      preload: path.join(__dirname, 'preload.js') // 预加载脚本
+      nodeIntegration: false,
+      contextIsolation: true, 
+      preload: path.join(__dirname, 'preload.js') 
     }
   })
 
@@ -19,7 +22,24 @@ function createWindow() {
   // win.webContents.openDevTools()
 }
 
-app.whenReady().then(createWindow)
+app.whenReady().then(() => {
+  createWindow()
+
+  ipcMain.on('window-minimize', (event) => {
+    BrowserWindow.fromWebContents(event.sender)?.minimize()
+  })
+  ipcMain.on('window-maximize', (event) => {
+    const win = BrowserWindow.fromWebContents(event.sender)
+    if (win?.isMaximized()) {
+      win.unmaximize()
+    } else {
+      win?.maximize()
+    }
+  })
+  ipcMain.on('window-close', (event) => {
+    BrowserWindow.fromWebContents(event.sender)?.close()
+  })
+})
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit()
