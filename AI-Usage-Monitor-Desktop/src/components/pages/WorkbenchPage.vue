@@ -193,22 +193,28 @@ const updateTokenChart = () => {
   tokenChartInstance.setOption(option, true)
 }
 
-// 监听时间范围变化，动态更新图表（模型用量与余量概览保持不变）
+// 监听时间范围变化，动态更新图表和 Token 消耗总量
 watch(timeRange, () => {
   updateTokenChart()
 })
 
-// 5. 计算属性：Token 消耗总量（格式化后）
+// 5. 计算属性：Token 消耗总量（格式化后），跟随时间维度变化
 const totalTokensFormatted = computed(() => {
-  const total = modelUsageAndQuotas.value.reduce((sum, item) => sum + item.usedTokensRaw, 0)
+  const rawList = mockRawApiData[timeRange.value] || []
+  const total = rawList.reduce((sum, item) => sum + item.usedTokens, 0)
   return formatTokens(total)
 })
 
-// 6. 计算属性：Token 用量 TOP3 模型
+// 6. 计算属性：Token 用量 TOP3 模型，跟随时间维度变化
 const top3Tokens = computed(() => {
-  return [...modelUsageAndQuotas.value]
-    .sort((a, b) => b.usedTokensRaw - a.usedTokensRaw)
+  const rawList = mockRawApiData[timeRange.value] || []
+  return [...rawList]
+    .sort((a, b) => b.usedTokens - a.usedTokens)
     .slice(0, 3)
+    .map(item => ({
+      ...item,
+      usedTokensFormatted: formatTokens(item.usedTokens)
+    }))
 })
 
 // 7. 计算属性：只筛选出状态为 danger 和 warning 的告警模型列表，传给底层告警卡片展示
@@ -225,8 +231,8 @@ const handleResize = () => {
 
 // 生命周期：组件挂载时（此时 DOM 已经生成完毕，可以安全地初始化 ECharts）
 onMounted(() => {
-  // 1. 初始化时手动触发一次数据清洗
-  const rawList = mockRawApiData[timeRange.value] || []
+  // 1. 模型用量与余量固定展示，不随 timeRange 变化
+  const rawList = mockRawApiData['today'] || []
   modelUsageAndQuotas.value = rawList.map(item => ({
     ...item,
     usedTokensFormatted: formatTokens(item.usedTokens),
