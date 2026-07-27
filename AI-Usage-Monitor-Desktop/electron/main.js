@@ -1,5 +1,5 @@
-import { app, BrowserWindow } from 'electron'
-import path from 'path'
+const { app, BrowserWindow } = require('electron')
+const path = require('path')
 
 function createWindow() {
   const win = new BrowserWindow({
@@ -8,7 +8,7 @@ function createWindow() {
     webPreferences: {
       nodeIntegration: false,      // 安全
       contextIsolation: true,      // 安全
-      preload: path.join(import.meta.dirname, 'preload.js') // 预加载脚本
+      preload: path.join(__dirname, 'preload.js') // 预加载脚本
     }
   })
 
