@@ -5,7 +5,7 @@
 
 ## 功能描述 Functional Description
 AI用量监控适用于Deepseek,Kimi,GLM.Qwen等模型的API调用情况集成监控，方便用户直观了解模型调用情况。  
-The AI usage monitor can get Deepseek,Kimi,GLM.Qwen and so on model's API usage situation,and display it in a clear and intuitive way.
+The AI usage monitor can get Deepseek,Kimi,GLM.Qwen and so on model's API usage situation,and display it in a clear and intuitive way.  
 <img width="500" height="364.83" alt="6557c19d-6e56-424d-baa8-248b653cbe46" src="https://github.com/user-attachments/assets/1c6ef5af-fae1-4d58-98cd-e48754e4b14f" />
 ## 快速构建 Quick Build
 环境要求 Environment Requirements
