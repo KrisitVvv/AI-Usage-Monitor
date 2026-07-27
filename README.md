@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="./images/logo.png" alt="Logo" width="120" />
+  <img src="./images/logo.png" alt="Logo" width="350" />
   <h1>AI用量监控 AI-Usage-Monitor</h1>
 </div>
 
