@@ -1,0 +1,15 @@
+{
+  "name": "ai-uasge-monitor-desktop",
+  "version": "1.0.0",
+  "main": "electron/main.js",
+  "scripts": {
+    "dev": "vite",
+    "electron:dev": "concurrently \"vite\" \"electron .\"",
+    "build": "vite build"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^5.0.0",
+    "electron": "^28.0.0",
+    "vite": "^5.0.0"
+  }
+}
