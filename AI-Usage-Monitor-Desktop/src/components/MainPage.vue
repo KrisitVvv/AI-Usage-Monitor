@@ -28,6 +28,7 @@
         :class="sidebarExpanded ? 'expanded' : 'collapsed'"
         @mouseenter="startExpandTimer"
         @mouseleave="cancelExpandTimer"
+        @transitionend="handleSidebarTransitionEnd"
       >
         <div class="sidebar-content">
           <nav class="main-navigation">
@@ -118,6 +119,10 @@ export default {
         this.expandTimer = null
       }
       this.sidebarExpanded = false
+    },
+    handleSidebarTransitionEnd() {
+      // 侧边栏过渡动画结束时，向子路由组件派发通知事件，让其重绘图表
+      window.dispatchEvent(new Event('sidebar-toggle-resize'))
     },
     minimizeWindow() {
       if (window.electronAPI) window.electronAPI.minimize()
