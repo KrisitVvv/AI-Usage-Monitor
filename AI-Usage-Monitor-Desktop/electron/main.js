@@ -1,9 +1,11 @@
 const { app, BrowserWindow, ipcMain } = require('electron')
 const path = require('path')
 
+let mainWindow = null
+
 function createWindow() {
-  const win = new BrowserWindow({
-    width: 940,
+  mainWindow = new BrowserWindow({
+    width: 960,
     height: 700,
     minWidth: 600,
     minHeight: 420,
@@ -16,11 +18,19 @@ function createWindow() {
     }
   })
 
+  // 监听窗口原生最大化/还原事件，同步状态到渲染进程
+  mainWindow.on('maximize', () => {
+    mainWindow?.webContents.send('window-state-changed', true)
+  })
+  mainWindow.on('unmaximize', () => {
+    mainWindow?.webContents.send('window-state-changed', false)
+  })
+
   // 开发模式下加载 Vite 服务器
-  win.loadURL('http://localhost:5173')
+  mainWindow.loadURL('http://localhost:5173')
 
   // 可选：打开 DevTools
-  // win.webContents.openDevTools()
+   mainWindow.webContents.openDevTools()
 }
 
 app.whenReady().then(() => {

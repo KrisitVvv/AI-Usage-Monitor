@@ -92,7 +92,8 @@ export default {
     return {
       sidebarExpanded: false,
       expandTimer: null,
-      isMaximized: false
+      isMaximized: false,
+      unsubscribeWindowState: null
     }
   },
   computed: {
@@ -104,6 +105,19 @@ export default {
         'settings': '系统设置'
       }
       return routeTitles[this.$route.name] || '系统概览'
+    }
+  },
+  mounted() {
+    // 监听主进程发送的窗口状态变更（如双击标题栏、拖拽窗口触发的最大化/还原）
+    if (window.electronAPI?.onWindowStateChanged) {
+      this.unsubscribeWindowState = window.electronAPI.onWindowStateChanged((isMaximized) => {
+        this.isMaximized = isMaximized
+      })
+    }
+  },
+  beforeUnmount() {
+    if (typeof this.unsubscribeWindowState === 'function') {
+      this.unsubscribeWindowState()
     }
   },
   methods: {
@@ -147,7 +161,7 @@ export default {
 
 <style scoped>
 .main-container {
-  background-color: #f8fafc;
+  background-color: transparent;
   font-family: ui-sans-serif, system-ui, sans-serif;
   color: #0f172a;
   height: 100vh;
@@ -314,7 +328,7 @@ export default {
 
 .nav-item:hover,
 .nav-item-collapsed:hover {
-  color: #9333ea;
+  color: #467DF1;
 }
 
 .nav-text {
@@ -351,17 +365,16 @@ export default {
   flex: 1;
   overflow: auto;
   position: relative;
-  padding: 1.5rem;
 }
 
 /* 激活状态 */
 .nav-item.active-nav-item,
 .nav-item-collapsed.active-nav-item {
-  color: #9333ea;
+  color: #467DF1;
 }
 
 .active-nav-item .nav-icon {
-  color: #9333ea;
+  color: #467DF1;
 }
 
 /* 动画 */
