@@ -7,7 +7,8 @@ function createWindow() {
     height: 700,
     minWidth: 600,
     minHeight: 420,
-    frame: false, 
+    frame: false,
+    icon: path.join(__dirname, '..', 'public', 'square_logo.png'),
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true, 
