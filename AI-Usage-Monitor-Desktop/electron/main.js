@@ -450,6 +450,85 @@ app.whenReady().then(() => {
     }
   })
 
+  // ---------- 获取应用版本号 ----------
+  ipcMain.handle('get-app-version', () => {
+    return app.getVersion()
+  })
+
+  // ---------- 检查 GitHub 更新 ----------
+  ipcMain.handle('check-for-updates', async () => {
+    try {
+      const response = await fetch('https://api.github.com/repos/KrisitVvv/AI-Usage-Monitor/releases/latest')
+      if (!response.ok) {
+        return { success: false, error: `GitHub API 返回 ${response.status}` }
+      }
+      const release = await response.json()
+      const latestVersion = (release.tag_name || '').replace(/^v/i, '')
+      const currentVersion = app.getVersion()
+      const downloadUrl = release.html_url
+      const releaseNotes = release.body || ''
+      return {
+        success: true,
+        currentVersion,
+        latestVersion,
+        hasUpdate: latestVersion !== currentVersion,
+        downloadUrl,
+        releaseNotes
+      }
+    } catch (e) {
+      console.error('[Main] 检查更新失败:', e.message)
+      return { success: false, error: e.message }
+    }
+  })
+
+  // ---------- 获取缓存大小 ----------
+  ipcMain.handle('get-cache-size', async () => {
+    try {
+      const cachePath = path.join(app.getPath('userData'), 'Cache')
+      let totalSize = 0
+      function calcSize(dir) {
+        if (!fs.existsSync(dir)) return
+        const entries = fs.readdirSync(dir, { withFileTypes: true })
+        for (const entry of entries) {
+          const fullPath = path.join(dir, entry.name)
+          if (entry.isDirectory()) {
+            calcSize(fullPath)
+          } else {
+            totalSize += fs.statSync(fullPath).size
+          }
+        }
+      }
+      calcSize(cachePath)
+      return { success: true, size: totalSize }
+    } catch (e) {
+      return { success: false, error: e.message, size: 0 }
+    }
+  })
+
+  // ---------- 清理缓存 ----------
+  ipcMain.handle('clear-cache', async () => {
+    try {
+      const cachePath = path.join(app.getPath('userData'), 'Cache')
+      function removeDir(dir) {
+        if (!fs.existsSync(dir)) return
+        const entries = fs.readdirSync(dir, { withFileTypes: true })
+        for (const entry of entries) {
+          const fullPath = path.join(dir, entry.name)
+          if (entry.isDirectory()) {
+            removeDir(fullPath)
+          } else {
+            fs.unlinkSync(fullPath)
+          }
+        }
+        fs.rmdirSync(dir)
+      }
+      removeDir(cachePath)
+      return { success: true }
+    } catch (e) {
+      return { success: false, error: e.message }
+    }
+  })
+
   // ====== 30 秒自动采集 ======
   function triggerCollect() {
     collectAll().then(data => {
