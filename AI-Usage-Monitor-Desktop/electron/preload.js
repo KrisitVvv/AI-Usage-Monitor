@@ -60,6 +60,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // ---------- 打开外部链接 ----------
   openExternal: (url) => ipcRenderer.invoke('open-external', url),
 
+  // ---------- 检查更新 ----------
+  checkForUpdates: () => ipcRenderer.invoke('check-for-updates'),
+  getAppVersion: () => ipcRenderer.invoke('get-app-version'),
+
+  // ---------- 缓存管理 ----------
+  getCacheSize: () => ipcRenderer.invoke('get-cache-size'),
+  clearCache: () => ipcRenderer.invoke('clear-cache'),
+
   // ---------- 供 main world 拦截脚本调用的记录接口 ----------
   // 由 main.js 注入的 fetch/XHR 拦截器在检测到
   // DeepSeek Chat API 响应中的 usage 字段后调用此方法
