@@ -30,11 +30,25 @@ function createWindow() {
     mainWindow.loadURL('http://localhost:5173')
 
   // 可选：打开 DevTools
-   //mainWindow.webContents.openDevTools()
+  mainWindow.webContents.openDevTools()
 }
 
 app.whenReady().then(() => {
   createWindow()
+
+  // 监听开机自启动 IPC 消息设置
+  ipcMain.on('set-auto-launch', (event, openAtLogin) => {
+    app.setLoginItemSettings({
+      openAtLogin: openAtLogin,
+      path: process.execPath
+    })
+  })
+
+  // 获取当前系统开机自启动设置
+  ipcMain.handle('get-auto-launch', () => {
+    const settings = app.getLoginItemSettings()
+    return settings.openAtLogin
+  })
 
   ipcMain.on('window-minimize', (event) => {
     BrowserWindow.fromWebContents(event.sender)?.minimize()

@@ -101,6 +101,19 @@ export default {
     }
   },
   mounted() {
+    // 读取并应用 localStorage 里的偏好设置
+    const savedConfig = localStorage.getItem('ai_monitor_sync_config')
+    if (savedConfig) {
+      try {
+        const config = JSON.parse(savedConfig)
+        if (config.theme === 'dark') {
+          document.documentElement.classList.add('dark-mode')
+        } else {
+          document.documentElement.classList.remove('dark-mode')
+        }
+      } catch (e) {}
+    }
+
     // 监听主进程发送的窗口状态变更（如双击标题栏、拖拽窗口触发的最大化/还原）
     if (window.electronAPI?.onWindowStateChanged) {
       this.unsubscribeWindowState = window.electronAPI.onWindowStateChanged((isMaximized) => {

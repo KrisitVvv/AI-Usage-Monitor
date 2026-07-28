@@ -231,13 +231,37 @@ const handleResize = () => {
 
 // 生命周期：组件挂载时（此时 DOM 已经生成完毕，可以安全地初始化 ECharts）
 onMounted(() => {
-  // 1. 模型用量与余量固定展示，不随 timeRange 变化
+  // 1. 模型用量与余量固定展示，优先读取存储的 API Key / 模拟数据
   const rawList = mockRawApiData['today'] || []
-  modelUsageAndQuotas.value = rawList.map(item => ({
-    ...item,
-    usedTokensFormatted: formatTokens(item.usedTokens),
-    usedTokensRaw: item.usedTokens
-  }))
+  
+  // 核心自测增强：读取设置页保存的 API Key 授权状态，动态同步告警状态
+  const savedAuth = localStorage.getItem('ai_monitor_auth_states')
+  let authMap = {}
+  if (savedAuth) {
+    try { authMap = JSON.parse(savedAuth) } catch (e) {}
+  }
+
+  modelUsageAndQuotas.value = rawList.map(item => {
+    // 将模型与设置页的服务进行映射匹配 (如 DeepSeek -> deepseek_api)
+    let serviceId = ''
+    if (item.type === 'DeepSeek') serviceId = 'deepseek_api'
+    else if (item.type === 'Moonshot') serviceId = 'kimi_api'
+    else if (item.type === 'OpenAI') serviceId = 'chatgpt_api'
+
+    const auth = authMap[serviceId]
+    let currentStatus = item.status
+    // 如果设置页中显式未配置或验证失败，实时标记为 danger
+    if (auth && (!auth.has_key || auth.is_auth === 0)) {
+      currentStatus = 'danger'
+    }
+
+    return {
+      ...item,
+      status: currentStatus,
+      usedTokensFormatted: formatTokens(item.usedTokens),
+      usedTokensRaw: item.usedTokens
+    }
+  })
 
   // 2. 初始化并绑定图表
   initTokenChart()
