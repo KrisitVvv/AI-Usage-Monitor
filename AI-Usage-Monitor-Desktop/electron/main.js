@@ -68,7 +68,7 @@ function writeSettings(settings) {
 // 创建系统托盘
 function createTray() {
   const iconPath = path.join(__dirname, '..', 'public', 'square_logo.png')
-  const icon = nativeImage.createFromPath(iconPath)
+  const icon = nativeImage.createFromPath(iconPath).resize({ width: 16, height: 16 })
   tray = new Tray(icon)
   tray.setToolTip('AI Usage Monitor')
 

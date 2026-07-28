@@ -8,7 +8,7 @@ AI用量监控适用于Deepseek,Kimi,GLM.Qwen等模型的API调用情况集成�
 The AI usage monitor can get Deepseek,Kimi,GLM.Qwen and so on model's API usage situation,and display it in a clear and intuitive way.  
 <p align="center"><img width="480" height="350" alt="Image" src="https://github.com/user-attachments/assets/126555e0-15bf-4e19-b291-b64e943daa39" /></p>
 
-**目前支持服务商：**
+**目前支持服务商 Now Supported Providers**
 - Deepseek  
 
 ## 快速构建 Quick Build
