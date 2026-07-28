@@ -1,102 +1,86 @@
 <script setup>
-// 1. 当前选中的时间范围：'today' (今天) | 'week' (本周) | 'month' (本月) | 'year' (今年)
 import { ref, onMounted, onUnmounted, watch, computed } from 'vue'
 import * as echarts from 'echarts'
 
-// 1. 当前选中的时间范围：'today' (今天) | 'week' (本周) | 'month' (本月) | 'year' (今年)
+// 1. 当前选中的时间范围
 const timeRange = ref('today')
+const loading = ref(true)
 
-// 2. 模拟各个时间维度下从后端返还的“模型用量与余量”原始 API 接口数据
-// 提示：模拟后端接口只返还这一类最原始的数据，包含用量和余额。
-// 饼图和卡片列表的比例、展示全部通过前端二次处理计算得出。
-const mockRawApiData = {
-  today: [
-    { id: 1, provider: 'DeepSeek API', name: 'DeepSeek-V3', usedTokens: 8500, plans: [{ limit: 10000 }], remaining: 1.50, budget: 10.00, threshold: 10.00, unit: '元', type: 'DeepSeek', status: 'danger', billingMode: 'plan' },
-    { id: 2, provider: 'Kimi API', name: 'Kimi (Moonshot)', usedTokens: 2100, plans: [{ limit: 8000 }], remaining: 8.40, budget: 20.00, threshold: 20.00, unit: '元', type: 'Moonshot', status: 'warning', billingMode: 'plan' },
-    { id: 3, provider: 'OpenAI API', name: 'GPT-4o', usedTokens: 4200, plans: [{ limit: 8000 }, { limit: 10000 }], remaining: 152.00, budget: 200.00, threshold: 50.00, unit: '美元', type: 'OpenAI', status: 'safe', billingMode: 'plan' },
-    { id: 4, provider: 'Aliyun API', name: 'Qwen-Max', usedTokens: 1200, plans: [], remaining: 88.10, budget: 100.00, threshold: 10.00, unit: '元', type: 'Aliyun', status: 'safe', billingMode: 'billing' }
-  ],
-  week: [
-    { id: 1, provider: 'DeepSeek API', name: 'DeepSeek-V3', usedTokens: 38000, plans: [{ limit: 50000 }], remaining: 1.50, budget: 10.00, threshold: 10.00, unit: '元', type: 'DeepSeek', status: 'danger', billingMode: 'plan' },
-    { id: 2, provider: 'Kimi API', name: 'Kimi (Moonshot)', usedTokens: 12000, plans: [{ limit: 25000 }], remaining: 8.40, budget: 20.00, threshold: 20.00, unit: '元', type: 'Moonshot', status: 'warning', billingMode: 'plan' },
-    { id: 3, provider: 'OpenAI API', name: 'GPT-4o', usedTokens: 45000, plans: [{ limit: 40000 }, { limit: 60000 }], remaining: 152.00, budget: 200.00, threshold: 50.00, unit: '美元', type: 'OpenAI', status: 'safe', billingMode: 'plan' },
-    { id: 4, provider: 'Aliyun API', name: 'Qwen-Max', usedTokens: 8000, plans: [], remaining: 88.10, budget: 100.00, threshold: 10.00, unit: '元', type: 'Aliyun', status: 'safe', billingMode: 'billing' }
-  ],
-  month: [
-    { id: 1, provider: 'DeepSeek API', name: 'DeepSeek-V3', usedTokens: 210000, plans: [{ limit: 300000 }], remaining: 1.50, budget: 10.00, threshold: 10.00, unit: '元', type: 'DeepSeek', status: 'danger', billingMode: 'plan' },
-    { id: 2, provider: 'Kimi API', name: 'Kimi (Moonshot)', usedTokens: 65000, plans: [{ limit: 100000 }], remaining: 8.40, budget: 20.00, threshold: 20.00, unit: '元', type: 'Moonshot', status: 'warning', billingMode: 'plan' },
-    { id: 3, provider: 'OpenAI API', name: 'GPT-4o', usedTokens: 120000, plans: [{ limit: 150000 }, { limit: 200000 }], remaining: 152.00, budget: 200.00, threshold: 50.00, unit: '美元', type: 'OpenAI', status: 'safe', billingMode: 'plan' },
-    { id: 4, provider: 'Aliyun API', name: 'Qwen-Max', usedTokens: 140000, plans: [], remaining: 88.10, budget: 100.00, threshold: 10.00, unit: '元', type: 'Aliyun', status: 'safe', billingMode: 'billing' }
-  ],
-  year: [
-    { id: 1, provider: 'DeepSeek API', name: 'DeepSeek-V3', usedTokens: 2800000, plans: [{ limit: 5000000 }], remaining: 1.50, budget: 10.00, threshold: 10.00, unit: '元', type: 'DeepSeek', status: 'danger', billingMode: 'plan' },
-    { id: 2, provider: 'Kimi API', name: 'Kimi (Moonshot)', usedTokens: 850000, plans: [{ limit: 1200000 }], remaining: 8.40, budget: 20.00, threshold: 20.00, unit: '元', type: 'Moonshot', status: 'warning', billingMode: 'plan' },
-    { id: 3, provider: 'OpenAI API', name: 'GPT-4o', usedTokens: 1800000, plans: [{ limit: 2000000 }, { limit: 3000000 }], remaining: 152.00, budget: 200.00, threshold: 50.00, unit: '美元', type: 'OpenAI', status: 'safe', billingMode: 'plan' },
-    { id: 4, provider: 'Aliyun API', name: 'Qwen-Max', usedTokens: 920000, plans: [], remaining: 88.10, budget: 100.00, threshold: 10.00, unit: '元', type: 'Aliyun', status: 'safe', billingMode: 'billing' }
-  ]
-}
+// 2. Token 统计实时数据（来自 IPC）
+const tokenStats = ref({
+  todayTotal: 0, weekTotal: 0, monthTotal: 0, yearTotal: 0,
+  models: [],
+  modelUsage: { today: {}, week: {}, month: {}, year: {} },
+  recentRecords: [],
+  todayModelDetails: [],
+  hourlyDeltas: [],
+  dailySummary: []
+})
 
-// 3. 各模型在不同时间段的 Token 用量数据（柱状图数据源）
-const MODEL_COLORS = {
-  'DeepSeek-V3': '#3b82f6',
-  'Kimi (Moonshot)': '#10b981',
-  'GPT-4o': '#f59e0b',
-  'Qwen-Max': '#8b5cf6'
-}
+// Token 统计错误状态
+const tokenStatsError = ref('')
 
-const MODEL_NAMES = ['DeepSeek-V3', 'Kimi (Moonshot)', 'GPT-4o', 'Qwen-Max']
+const manualRefreshing = ref(false)
 
-const mockTokenData = {
-  today: {
-    xData: ['00:00', '04:00', '08:00', '12:00', '16:00', '20:00', '24:00'],
-    series: [
-      { name: 'DeepSeek-V3', data: [320, 210, 900, 1800, 1400, 2200, 800] },
-      { name: 'Kimi (Moonshot)', data: [180, 120, 520, 850, 600, 1100, 350] },
-      { name: 'GPT-4o', data: [400, 280, 1100, 2100, 1700, 3200, 1200] },
-      { name: 'Qwen-Max', data: [300, 190, 980, 1450, 1100, 3000, 750] }
-    ]
-  },
-  week: {
-    xData: ['周一', '周二', '周三', '周四', '周五', '周六', '周日'],
-    series: [
-      { name: 'DeepSeek-V3', data: [6800, 8500, 7200, 10000, 9200, 3800, 4200] },
-      { name: 'Kimi (Moonshot)', data: [3200, 4000, 3500, 5200, 4500, 1800, 2200] },
-      { name: 'GPT-4o', data: [8000, 9800, 8500, 14000, 12000, 4200, 5000] },
-      { name: 'Qwen-Max', data: [7000, 8700, 7400, 12800, 9300, 5200, 6600] }
-    ]
-  },
-  month: {
-    xData: ['第1周', '第2周', '第3周', '第4周'],
-    series: [
-      { name: 'DeepSeek-V3', data: [48000, 52000, 50000, 60000] },
-      { name: 'Kimi (Moonshot)', data: [22000, 25000, 24000, 28000] },
-      { name: 'GPT-4o', data: [55000, 60000, 58000, 72000] },
-      { name: 'Qwen-Max', data: [50000, 55000, 60000, 65000] }
-    ]
-  },
-  year: {
-    xData: ['一月', '二月', '三月', '四月', '五月', '六月', '七月', '八月', '九月', '十月', '十一月', '十二月'],
-    series: [
-      { name: 'DeepSeek-V3', data: [320000, 300000, 380000, 410000, 450000, 480000, 420000, 460000, 520000, 580000, 650000, 700000] },
-      { name: 'Kimi (Moonshot)', data: [150000, 140000, 180000, 190000, 220000, 240000, 210000, 230000, 280000, 300000, 340000, 360000] },
-      { name: 'GPT-4o', data: [380000, 360000, 450000, 480000, 520000, 560000, 510000, 550000, 620000, 680000, 750000, 820000] },
-      { name: 'Qwen-Max', data: [400000, 380000, 490000, 520000, 580000, 610000, 550000, 600000, 690000, 750000, 820000, 900000] }
-    ]
+let unsubscribeToken = null
+
+async function manualRefresh() {
+  if (!window.electronAPI?.refreshMonitorNow || manualRefreshing.value) return
+  manualRefreshing.value = true
+  try {
+    await window.electronAPI.refreshMonitorNow()
+  } catch (e) {
+    console.warn('[Workbench] 手动刷新失败:', e.message)
+  } finally {
+    setTimeout(() => { manualRefreshing.value = false }, 6000)
   }
 }
 
-// 4. 当前组件实际使用的响应式模型数据对象，监听 timeRange 时会从原始 API 数据中提取
-const modelUsageAndQuotas = ref([])
+// 3. 供应商列表和余额
+const vendors = ref([])
+const balance = ref(null)
+const realtimeUsage = ref({ deepseekBalances: {} })
 
-// 根据供应商类型和 slot 索引获取进度条标签
-const getPlanLabel = (model, slotIndex) => {
-  if (slotIndex === 0) return 'Coding Plan'
-  if (model.type === 'OpenAI') return '30 天'
+// 4. 模型颜色映射
+const MODEL_COLORS = {
+  'deepseek-chat': '#3b82f6',
+  'deepseek-reasoner': '#6366f1',
+  'deepseek-v3': '#3b82f6',
+  'deepseek-v4-flash': '#3b82f6',
+  'deepseek-v4-pro': '#6366f1',
+  'deepseek-v4': '#64748b',
+  'default': '#64748b'
+}
+
+// 从完整模型名提取显示名：deepseek-v4-flash → flash, deepseek-v4-pro → pro
+function getModelDisplayName(model) {
+  if (!model) return model
+  const lower = model.toLowerCase()
+  // 匹配 deepseek-vN-xxx 或 deepseek-chat 等模式，提取最后的变体部分
+  const match = lower.match(/^deepseek[-_]?(?:v\d+[-_]?)?(.+)$/)
+  if (match && match[1]) {
+    return match[1].replace(/[-_]/g, ' ')
+  }
+  // deepseek-chat → chat, deepseek-reasoner → reasoner
+  const simple = lower.match(/^deepseek[-_](.+)$/)
+  if (simple && simple[1]) return simple[1]
+  return model
+}
+
+// 获取模型对应的供应商名
+function getVendorName(model) {
+  if (!model) return ''
+  if (model.toLowerCase().startsWith('deepseek')) return 'DeepSeek'
   return ''
 }
 
-// Token 数值格式化：超过 1000 显示 K，超过 10000 显示 W，超过 1000000 显示 M，超过 1000000000 显示 B
+function modelColorFn(model) {
+  return MODEL_COLORS[model] || MODEL_COLORS.default
+}
+
+// Token 数值格式化
 const formatTokens = (value) => {
+  if (!value) return '0'
   if (value >= 1000000000) return (value / 1000000000).toFixed(1).replace(/\.0$/, '') + 'B'
   if (value >= 1000000) return (value / 1000000).toFixed(1).replace(/\.0$/, '') + 'M'
   if (value >= 10000) return (value / 10000).toFixed(1).replace(/\.0$/, '') + 'W'
@@ -104,41 +88,225 @@ const formatTokens = (value) => {
   return value.toString()
 }
 
-// 5. 图表 DOM 元素的引用 (Vue 模板中 ref 属性对应的变量)
+// 5. 图表引用
 const tokenChartRef = ref(null)
-
-// 6. 存储 ECharts 实例的变量
 let tokenChartInstance = null
 
-// 初始化 Token 用量柱状图
+// 构建柱状图数据（按时间粒度分段）
+function buildChartData() {
+  const range = timeRange.value
+  const hourlyDeltas = tokenStats.value.hourlyDeltas || []
+  const dailySummary = tokenStats.value.dailySummary || []
+  const usage = tokenStats.value.modelUsage || {}
+  const allModels = tokenStats.value.models || []
+  const currentUsage = usage[range] || {}
+
+  const models = allModels.length > 0 ? allModels : Object.keys(currentUsage)
+  if (models.length === 0) {
+    return { xData: ['暂无数据'], series: [], hasData: false }
+  }
+
+  let xData = []
+  let buckets = [] // [{ label, models: { model: tokens } }]
+
+  if (range === 'today') {
+    // 小时粒度 — 展示完整 24 小时（00:00~23:00），无数据的时段显示 0
+    const dayOfWeek = new Date().getDay()
+    const dayNames = ['周日', '周一', '周二', '周三', '周四', '周五', '周六']
+    const hourMap = {}
+    for (const d of hourlyDeltas) {
+      hourMap[d.hour] = d.models || {}
+    }
+    const allHours = []
+    for (let h = 0; h < 24; h++) {
+      allHours.push(String(h).padStart(2, '0') + ':00')
+    }
+    xData = allHours.map(h => h === allHours[0] ? dayNames[dayOfWeek] + ' ' + h : h)
+    buckets = allHours.map(h => ({
+      label: h,
+      models: hourMap[h] || {}
+    }))
+  } else if (range === 'week') {
+    // 天粒度（最近 7 天）
+    const recent7 = dailySummary.slice(-7)
+    xData = recent7.map(d => d.dayLabel)
+    buckets = recent7.map(d => ({
+      label: d.dayLabel,
+      models: d.models || {}
+    }))
+  } else if (range === 'month') {
+    // 周粒度：将最近 31 天按自然周聚合
+    const weeks = {}
+    for (const day of dailySummary) {
+      const d = new Date(day.date)
+      const dayOfWeek = d.getDay() || 7
+      const monday = new Date(d)
+      monday.setDate(d.getDate() - dayOfWeek + 1)
+      const weekKey = `${monday.getMonth() + 1}/${monday.getDate()}`
+      if (!weeks[weekKey]) weeks[weekKey] = { label: weekKey, models: {} }
+      for (const [m, t] of Object.entries(day.models || {})) {
+        weeks[weekKey].models[m] = (weeks[weekKey].models[m] || 0) + t
+      }
+    }
+    buckets = Object.values(weeks)
+    xData = buckets.map(b => b.label)
+  } else if (range === 'year') {
+    // 月粒度：将最近 31 天按月聚合
+    const months = {}
+    for (const day of dailySummary) {
+      const d = new Date(day.date)
+      const monthKey = `${d.getFullYear()}/${d.getMonth() + 1}`
+      const monthLabel = `${d.getMonth() + 1}月`
+      if (!months[monthKey]) months[monthKey] = { label: monthLabel, models: {} }
+      for (const [m, t] of Object.entries(day.models || {})) {
+        months[monthKey].models[m] = (months[monthKey].models[m] || 0) + t
+      }
+    }
+    buckets = Object.values(months)
+    xData = buckets.map(b => b.label)
+  }
+
+  if (xData.length === 0) {
+    return { xData: ['暂无数据'], series: [], hasData: false }
+  }
+
+  const series = models.map(m => ({
+    name: m,
+    rawName: m,
+    data: buckets.map(b => Math.max(b.models[m] || 0, 0))
+  }))
+
+  return { xData, series, hasData: series.some(s => s.data.some(v => v > 0)) }
+}
+
+const timeRangeLabel = computed(() => {
+  const map = { today: '今天', week: '本周', month: '本月', year: '今年' }
+  return map[timeRange.value] || '今天'
+})
+
+// Token 消耗总量
+const totalTokensFormatted = computed(() => {
+  const totals = { today: tokenStats.value.todayTotal, week: tokenStats.value.weekTotal, month: tokenStats.value.monthTotal, year: tokenStats.value.yearTotal }
+  return formatTokens(totals[timeRange.value] || 0)
+})
+
+// TOP3 模型
+const top3Tokens = computed(() => {
+  const usage = tokenStats.value.modelUsage?.[timeRange.value] || {}
+  return Object.entries(usage)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 3)
+    .map(([model, tokens]) => ({
+      name: model,
+      displayName: model,
+      usedTokens: tokens,
+      usedTokensFormatted: formatTokens(tokens)
+    }))
+})
+
+// 进度条标签
+const getPlanLabel = (model, slotIndex) => {
+  if (slotIndex === 0) return 'Token 用量进度'
+  return ''
+}
+
+// 供应商额度列表（同步 ProgressPage 的供应商数据）
+const modelUsageAndQuotas = computed(() => {
+  const vendorList = vendors.value || []
+  const bal = balance.value
+
+  if (vendorList.length === 0) return []
+
+  const list = []
+
+  for (const v of vendorList) {
+    const vendorName = v.provider || v.name || ''
+    const providerShort = vendorName.replace(/\s*API$/i, '').trim() || vendorName
+    const displayName = v.customName || providerShort
+
+    // 使用 balance 数据
+    const balances = realtimeUsage.value.deepseekBalances || {}
+    const vendorBal = balances[v.id] || (vendorName.toLowerCase().includes('deepseek') ? bal : null)
+    const budget = vendorBal ? (vendorBal.totalBudget || 0) : 0
+    const remaining = vendorBal ? (vendorBal.remaining || 0) : 0
+    const spent = vendorBal ? (vendorBal.spent || 0) : 0
+    const usedPercent = vendorBal ? (vendorBal.usedPercent || 0) : 0
+    const currency = vendorBal?.currency === 'CNY' ? '¥' : '$'
+
+    list.push({
+      id: v.id,
+      provider: vendorName,
+      name: displayName,
+      type: providerShort,
+      billingModel: v.billingMode || v.billingModel || 'plan',
+      usedTokens: spent,
+      usedTokensFormatted: budget > 0 ? `${currency}${spent.toFixed(2)}` : '0',
+      plans: [{ limit: budget > 0 ? budget : 1000000 }],
+      remaining: remaining,
+      budget: budget,
+      unit: currency,
+      status: usedPercent >= 90 ? 'danger' : usedPercent >= 75 ? 'warning' : 'safe',
+      apiKey: v.apiKey ? '***' + v.apiKey.slice(-4) : '',
+      _live: !!vendorBal && !vendorBal._stale
+    })
+  }
+
+  return list
+})
+
+// 处理来自详情页的重命名通知
+function applyPendingRenames() {
+  try {
+    const pending = JSON.parse(localStorage.getItem('pendingVendorRenames') || '[]')
+    if (!pending.length) return
+    const vendorList = vendors.value || []
+    let changed = false
+    for (const { vendorId, customName } of pending) {
+      const v = vendorList.find(vendor => vendor.id === vendorId)
+      if (v && v.customName !== customName) {
+        v.customName = customName
+        changed = true
+      }
+    }
+    if (changed) {
+      vendors.value = [...vendorList]
+    }
+    localStorage.removeItem('pendingVendorRenames')
+  } catch { /* 忽略 */ }
+}
+
+// 初始化图表
 const initTokenChart = () => {
   if (!tokenChartRef.value) return
   tokenChartInstance = echarts.init(tokenChartRef.value)
   updateTokenChart()
 }
 
-// 渲染/更新各模型 Token 用量分组柱状图
 const updateTokenChart = () => {
   if (!tokenChartInstance) return
-  const currentData = mockTokenData[timeRange.value]
+  const chartData = buildChartData()
 
-  const seriesList = currentData.series.map(s => ({
+  if (!chartData.hasData) {
+    tokenChartInstance.setOption({
+      title: { text: '尚无 Token 用量数据', left: 'center', top: 'center', textStyle: { color: '#94a3b8', fontSize: 14 } },
+      xAxis: { show: false },
+      yAxis: { show: false },
+      series: []
+    }, true)
+    return
+  }
+
+  const seriesList = chartData.series.map((s, i, arr) => ({
     name: s.name,
     type: 'bar',
     stack: 'total',
     data: s.data,
     itemStyle: {
-      color: MODEL_COLORS[s.name],
-      borderRadius: s.name === currentData.series[currentData.series.length - 1].name ? [4, 4, 0, 0] : 0
+      color: modelColorFn(s.rawName),
+      borderRadius: i === arr.length - 1 ? [4, 4, 0, 0] : 0
     },
     emphasis: {
-      itemStyle: {
-        color: MODEL_COLORS[s.name],
-        borderWidth: 1,
-        borderColor: '#fff',
-        shadowBlur: 8,
-        shadowColor: 'rgba(0,0,0,0.12)'
-      }
+      itemStyle: { borderWidth: 1, borderColor: '#fff', shadowBlur: 8, shadowColor: 'rgba(0,0,0,0.12)' }
     }
   }))
 
@@ -146,46 +314,24 @@ const updateTokenChart = () => {
     tooltip: {
       trigger: 'axis',
       axisPointer: { type: 'shadow' },
-      valueFormatter: (value) => {
-        if (value == null) return ''
-        if (value >= 1000000000) return (value / 1000000000).toFixed(1).replace(/\.0$/, '') + 'B'
-        if (value >= 1000000) return (value / 1000000).toFixed(1).replace(/\.0$/, '') + 'M'
-        if (value >= 1000) return (value / 1000).toFixed(1).replace(/\.0$/, '') + 'K'
-        return value.toString()
+      formatter: (params) => {
+        if (!params?.length) return ''
+        const header = params[0].axisValue
+        const lines = params.map(p => `${p.marker} ${p.seriesName}: ${formatTokens(p.value)}`)
+        return `${header}<br/>${lines.join('<br/>')}`
       }
     },
-    legend: {
-      orient: 'horizontal',
-      bottom: '0%',
-      left: 'center',
-      icon: 'roundRect',
-      itemWidth: 12,
-      itemHeight: 10,
-      itemGap: 16,
-      textStyle: { color: '#64748b', fontSize: 11 }
-    },
+    legend: { orient: 'horizontal', bottom: '0%', left: 'center', icon: 'roundRect', itemWidth: 12, itemHeight: 10, itemGap: 16, textStyle: { color: '#64748b', fontSize: 11 } },
     grid: { left: '8%', right: '5%', bottom: '18%', top: '6%' },
     xAxis: {
-      type: 'category',
-      data: currentData.xData,
+      type: 'category', data: chartData.xData,
       axisLine: { lineStyle: { color: '#cbd5e1' } },
-      axisLabel: { color: '#64748b' }
+      axisLabel: { color: '#64748b', rotate: chartData.xData.length > 12 ? 45 : 0, fontSize: chartData.xData.length > 12 ? 10 : 12 }
     },
     yAxis: {
-      type: 'value',
-      name: 'Tokens',
-      nameTextStyle: { color: '#64748b', fontSize: 12 },
+      type: 'value', name: 'Tokens', nameTextStyle: { color: '#64748b', fontSize: 12 },
       axisLine: { lineStyle: { color: '#cbd5e1' } },
-      axisLabel: {
-        color: '#64748b',
-        formatter: (value) => {
-          if (value >= 1000000000) return (value / 1000000000).toFixed(1) + 'B'
-          if (value >= 1000000) return (value / 1000000).toFixed(1) + 'M'
-          if (value >= 10000) return (value / 10000).toFixed(1) + 'W'
-          if (value >= 1000) return (value / 1000).toFixed(1) + 'K'
-          return value
-        }
-      },
+      axisLabel: { color: '#64748b', formatter: (v) => formatTokens(v) },
       splitLine: { lineStyle: { color: '#f1f5f9' } }
     },
     series: seriesList
@@ -193,129 +339,117 @@ const updateTokenChart = () => {
   tokenChartInstance.setOption(option, true)
 }
 
-// 监听时间范围变化，动态更新图表和 Token 消耗总量
-watch(timeRange, () => {
-  updateTokenChart()
-})
+watch(timeRange, () => updateTokenChart())
+watch(tokenStats, () => updateTokenChart(), { deep: true })
 
-// 5. 计算属性：Token 消耗总量（格式化后），跟随时间维度变化
-const totalTokensFormatted = computed(() => {
-  const rawList = mockRawApiData[timeRange.value] || []
-  const total = rawList.reduce((sum, item) => sum + item.usedTokens, 0)
-  return formatTokens(total)
-})
-
-// 6. 计算属性：Token 用量 TOP3 模型，跟随时间维度变化
-const top3Tokens = computed(() => {
-  const rawList = mockRawApiData[timeRange.value] || []
-  return [...rawList]
-    .sort((a, b) => b.usedTokens - a.usedTokens)
-    .slice(0, 3)
-    .map(item => ({
-      ...item,
-      usedTokensFormatted: formatTokens(item.usedTokens)
-    }))
-})
-
-// 7. 计算属性：只筛选出状态为 danger 和 warning 的告警模型列表，传给底层告警卡片展示
-const activeQuotaAlerts = computed(() => {
-  return modelUsageAndQuotas.value.filter(item => item.status === 'danger' || item.status === 'warning')
-})
-
-// 处理窗口大小变化时，图表自适应缩放（加入防御性判断，防止实例已被销毁时 resize 报错）
 const handleResize = () => {
-  if (tokenChartInstance && !tokenChartInstance.isDisposed()) {
-    tokenChartInstance.resize()
-  }
+  if (tokenChartInstance && !tokenChartInstance.isDisposed()) tokenChartInstance.resize()
 }
 
 // 生命周期：组件挂载时（此时 DOM 已经生成完毕，可以安全地初始化 ECharts）
-onMounted(() => {
-  // 1. 模型用量与余量固定展示，优先读取存储的 API Key / 模拟数据
-  const rawList = mockRawApiData['today'] || []
-  
-  // 核心自测增强：读取设置页保存的 API Key 授权状态，动态同步告警状态
-  const savedAuth = localStorage.getItem('ai_monitor_auth_states')
-  let authMap = {}
-  if (savedAuth) {
-    try { authMap = JSON.parse(savedAuth) } catch (e) {}
+onMounted(async () => {
+  if (window.electronAPI) {
+    try {
+      const stats = await window.electronAPI.getTokenStats()
+      if (stats) {
+        tokenStats.value = { ...tokenStats.value, ...stats }
+        tokenStatsError.value = ''
+      } else {
+        tokenStatsError.value = 'Token 统计数据为空'
+      }
+    } catch (e) {
+      tokenStatsError.value = '加载 Token 统计失败: ' + (e.message || '未知错误')
+      console.warn('[Workbench] 加载 token 统计失败:', e.message)
+    }
+
+    try {
+      const usageData = await window.electronAPI.getUsageData()
+      if (usageData) {
+        vendors.value = usageData.vendors || []
+        balance.value = usageData.deepseekBalance || null
+        if (usageData.deepseekBalances) {
+          realtimeUsage.value.deepseekBalances = usageData.deepseekBalances
+        }
+      }
+    } catch (e) {
+      console.warn('[Workbench] 加载用量数据失败:', e.message)
+    }
+
+    // 处理来自详情页的重命名通知
+    applyPendingRenames()
+
+    unsubscribeToken = window.electronAPI.onTokenStatsUpdated((data) => {
+      if (data) {
+        tokenStats.value = { ...tokenStats.value, ...data }
+        tokenStatsError.value = ''
+      }
+    })
+
+    window.electronAPI.onUsageDataUpdated((data) => {
+      if (data.vendors) vendors.value = data.vendors
+      if (data.deepseekBalance) balance.value = data.deepseekBalance
+      if (data.deepseekBalances) realtimeUsage.value = { ...realtimeUsage.value, deepseekBalances: data.deepseekBalances }
+    })
+  } else {
+    tokenStatsError.value = '运行环境不支持（非 Electron）'
   }
 
-  modelUsageAndQuotas.value = rawList.map(item => {
-    // 将模型与设置页的服务进行映射匹配 (如 DeepSeek -> deepseek_api)
-    let serviceId = ''
-    if (item.type === 'DeepSeek') serviceId = 'deepseek_api'
-    else if (item.type === 'Moonshot') serviceId = 'kimi_api'
-    else if (item.type === 'OpenAI') serviceId = 'chatgpt_api'
-
-    const auth = authMap[serviceId]
-    let currentStatus = item.status
-    // 如果设置页中显式未配置或验证失败，实时标记为 danger
-    if (auth && (!auth.has_key || auth.is_auth === 0)) {
-      currentStatus = 'danger'
-    }
-
-    return {
-      ...item,
-      status: currentStatus,
-      usedTokensFormatted: formatTokens(item.usedTokens),
-      usedTokensRaw: item.usedTokens
-    }
-  })
-
-  // 2. 初始化并绑定图表
+  setTimeout(() => { loading.value = false }, 400)
   initTokenChart()
   window.addEventListener('resize', handleResize)
-  // 监听侧边栏动画伸缩事件，保证图表不被折叠或挤压
   window.addEventListener('sidebar-toggle-resize', handleResize)
 })
 
-// 生命周期：组件销毁时（必须解绑事件监听并销毁图表，否则会产生内存泄漏，甚至导致应用崩溃）
 onUnmounted(() => {
   window.removeEventListener('resize', handleResize)
   window.removeEventListener('sidebar-toggle-resize', handleResize)
-  if (tokenChartInstance) {
-    tokenChartInstance.dispose()
-    tokenChartInstance = null
-  }
+  if (typeof unsubscribeToken === 'function') unsubscribeToken()
+  if (tokenChartInstance) { tokenChartInstance.dispose(); tokenChartInstance = null }
 })
 </script>
 
 <template>
   <div class="workbench-page">
-    <!-- 核心三层大容器布局 -->
     <div class="dashboard-layout">
-      
-      <!-- 1. 上层大容器：趋势折线图和占比圆形图 -->
+
+      <!-- 错误通知 -->
+      <div v-if="tokenStatsError" class="error-notice">
+        <span class="error-notice-icon">&#9888;</span>
+        <span class="error-notice-text">{{ tokenStatsError }}</span>
+      </div>
+
+
+
+      <!-- 1. 上层：趋势图 + Token 消耗总量 -->
       <div class="section charts-section">
         <div class="charts-grid">
-          <!-- Token 用量趋势图 -->
           <div class="chart-card">
             <div ref="tokenChartRef" class="chart-container"></div>
           </div>
-          <!-- Token 消耗总量展示卡 -->
           <div class="total-card">
             <div class="total-card-header">
               <span class="total-label">Token 消耗总量</span>
-              <select
-                class="time-range-select"
-                v-model="timeRange"
-                @change="timeRange = $event.target.value"
-              >
-                <option value="today">今天</option>
-                <option value="week">本周</option>
-                <option value="month">本月</option>
-                <option value="year">今年</option>
-              </select>
+              <div class="time-range-actions">
+                <select class="time-range-select" v-model="timeRange">
+                  <option value="today">今天</option>
+                  <option value="week">本周</option>
+                  <option value="month">本月</option>
+                  <option value="year">今年</option>
+                </select>
+                <button class="refresh-btn" @click="manualRefresh" :disabled="manualRefreshing" title="手动刷新数据">
+                  <span class="refresh-icon" :class="{ spinning: manualRefreshing }">&#x21bb;</span>
+                </button>
+              </div>
             </div>
             <div class="total-value-wrap">
               <span class="total-number">{{ totalTokensFormatted }}</span>
             </div>
             <div class="total-footer">
               <div class="top3-list">
+                <div v-if="top3Tokens.length === 0" class="empty-hint">尚无数据</div>
                 <div class="top3-item" v-for="(model, i) in top3Tokens" :key="model.name">
                   <span class="top3-rank" :class="'rank-' + (i + 1)">{{ i + 1 }}</span>
-                  <span class="top3-name">{{ model.name }}</span>
+                  <span class="top3-name">{{ model.displayName }}</span>
                   <span class="top3-value">{{ model.usedTokensFormatted }}</span>
                 </div>
               </div>
@@ -324,86 +458,56 @@ onUnmounted(() => {
         </div>
       </div>
 
-      <!-- 2. 中层大容器：各个模型的用量进度条 -->
+      <!-- 2. 下层：模型用量进度条 -->
       <div class="section top-stats-section">
         <div class="section-card-wrapper">
           <div class="section-card-header">
             <div class="header-title-group">
-              <h3 class="container-title">模型用量与余量</h3>
+              <h3 class="container-title">用量与余量</h3>
             </div>
           </div>
 
-          <div class="models-progress-list">
-            <div 
-              v-for="model in modelUsageAndQuotas" 
-              :key="model.name"
+          <div class="models-progress-list" v-if="modelUsageAndQuotas.length">
+            <div
+              v-for="model in modelUsageAndQuotas"
+              :key="model.id"
               class="model-progress-item"
             >
               <div class="model-progress-header">
                 <div class="model-meta">
-                  <!-- 供应商图标（有则只显示图标，无则显示文字 badge） -->
-                  <template v-if="model.type === 'DeepSeek'">
-                    <svg class="provider-icon deepseek" width="20" height="20" viewBox="0 0 24 24" fill="none"><path d="M12 2L2 7l10 5 10-5-10-5z" fill="currentColor"/><path d="M2 17l10 5 10-5" stroke="currentColor" stroke-width="2" fill="none"/><path d="M2 12l10 5 10-5" stroke="currentColor" stroke-width="2" fill="none"/></svg>
-                  </template>
-                  <template v-else-if="model.type === 'Moonshot'">
-                    <svg class="provider-icon moonshot" width="20" height="20" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="1.5" fill="none"/><path d="M12 6v6l4 2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
-                  </template>
-                  <template v-else-if="model.type === 'OpenAI'">
-                    <svg class="provider-icon openai" width="20" height="20" viewBox="0 0 24 24" fill="none"><path d="M12 2a4 4 0 014 4v4a4 4 0 01-4 4 4 4 0 01-4-4V6a4 4 0 014-4z" fill="currentColor" opacity="0.6"/><path d="M12 10a4 4 0 014 4v4a4 4 0 01-4 4 4 4 0 01-4-4v-4a4 4 0 014-4z" fill="currentColor"/></svg>
-                  </template>
-                  <template v-else-if="model.type === 'Aliyun'">
-                    <svg class="provider-icon aliyun" width="20" height="20" viewBox="0 0 24 24" fill="none"><path d="M18 10h-3a2 2 0 01-2-2V5a2 2 0 012-2h3a2 2 0 012 2v3a2 2 0 01-2 2z" fill="currentColor" opacity="0.6"/><path d="M9 14H6a2 2 0 01-2-2V9a2 2 0 012-2h3a2 2 0 012 2v3a2 2 0 01-2 2z" fill="currentColor"/><path d="M18 21h-3a2 2 0 01-2-2v-3a2 2 0 012-2h3a2 2 0 012 2v3a2 2 0 01-2 2z" fill="currentColor" opacity="0.4"/></svg>
-                  </template>
-                  <span v-else class="model-badge" :class="model.type.toLowerCase()">{{ model.type }}</span>
+                  <span v-if="model.provider?.toLowerCase().includes('deepseek')" class="model-logo"><img class="vendor-logo-img" src="/deepseek.png" alt="DeepSeek" /></span>
+                  <span v-else class="model-badge" :class="model.type?.toLowerCase() + '-badge' || 'default-badge'">{{ model.type || 'API' }}</span>
                   <span class="model-name-text">{{ model.name }}</span>
+                  <span v-if="model._live" class="live-badge">实时</span>
                 </div>
               </div>
               <div class="progress-bars">
-                <!-- 始终固定 2 条进度条位置 -->
-                <template v-for="slot in [0, 1]" :key="slot">
-                  <!-- Plan 模式：展示 plans 数组中对应 slot 的计划 -->
-                  <div v-if="model.billingMode === 'plan' && model.plans[slot]" class="progress-row">
-                    <span class="progress-label">{{ getPlanLabel(model, slot) }}</span>
-                    <div class="progress-track-wrap">
-                      <div class="progress-track">
-                        <div class="progress-fill coding-plan" :style="{ width: Math.min(model.usedTokens / model.plans[slot].limit * 100, 100) + '%' }"></div>
-                      </div>
-                      <span class="progress-text">{{ Math.round(model.usedTokens / model.plans[slot].limit * 100) }}%</span>
+                <div class="progress-row" v-if="model.budget > 0">
+                  <span class="progress-label">余额</span>
+                  <div class="progress-track-wrap">
+                    <div class="progress-track">
+                      <div
+                        class="progress-fill billing"
+                        :style="{ width: Math.min((model.budget - model.remaining) / model.budget * 100, 100) + '%' }"
+                      ></div>
                     </div>
+                    <span class="progress-text">{{ model.unit }}{{ (model.remaining || 0).toFixed(2) }} / {{ model.unit }}{{ (model.budget || 0).toFixed(2) }}</span>
                   </div>
-                  <!-- Plan 模式：空占位 slot -->
-                  <div v-else-if="model.billingMode === 'plan' && !model.plans[slot]" class="progress-row placeholder">
-                    <span class="progress-label">&nbsp;</span>
-                    <div class="progress-track-wrap">
-                      <div class="progress-track">
-                        <div class="progress-fill placeholder-bar"></div>
-                      </div>
-                      <span class="progress-text">&nbsp;</span>
+                </div>
+                <div class="progress-row" v-else>
+                  <span class="progress-label">余额</span>
+                  <div class="progress-track-wrap">
+                    <div class="progress-track">
+                      <div class="progress-fill billing" style="width:0%"></div>
                     </div>
+                    <span class="progress-text">—</span>
                   </div>
-                  <!-- Billing 模式：slot 0 展示计费进度（货币金额） -->
-                  <div v-if="model.billingMode === 'billing' && slot === 0" class="progress-row">
-                    <span class="progress-label">Token 消耗计费</span>
-                    <div class="progress-track-wrap">
-                      <div class="progress-track">
-                        <div class="progress-fill billing" :style="{ width: Math.min((model.budget - model.remaining) / model.budget * 100, 100) + '%' }"></div>
-                      </div>
-                      <span class="progress-text">{{ (model.budget - model.remaining).toFixed(2) }} / {{ model.budget.toFixed(2) }} {{ model.unit }}</span>
-                    </div>
-                  </div>
-                  <!-- Billing 模式：slot 1 空占位 -->
-                  <div v-if="model.billingMode === 'billing' && slot === 1" class="progress-row placeholder">
-                    <span class="progress-label">&nbsp;</span>
-                    <div class="progress-track-wrap">
-                      <div class="progress-track">
-                        <div class="progress-fill placeholder-bar"></div>
-                      </div>
-                      <span class="progress-text">&nbsp;</span>
-                    </div>
-                  </div>
-                </template>
+                </div>
               </div>
             </div>
+          </div>
+          <div v-else class="empty-state">
+            <span>尚无供应商数据，请先在"供应商额度"页面添加供应商</span>
           </div>
         </div>
       </div>
@@ -416,29 +520,18 @@ onUnmounted(() => {
   padding: 1.25rem;
   background-color: transparent;
   height: 100%;
-  overflow-y: auto; /* 允许纵向滚动，防止小窗口时底部卡片被截断 */
+  overflow-y: auto;
   box-sizing: border-box;
 }
 
-/* 上下大容器布局 */
 .dashboard-layout {
   display: flex;
   flex-direction: column;
   gap: 1.75rem;
 }
 
-.section {
-  width: 100%;
-}
+.section { width: 100%; }
 
-.section-title {
-  font-size: 1rem;
-  font-weight: 600;
-  color: #1e293b;
-  margin-bottom: 0.875rem;
-}
-
-/* 1. 最上层大容器：整体大卡片包裹 */
 .section-card-wrapper {
   background: white;
   border-radius: 12px;
@@ -470,7 +563,6 @@ onUnmounted(() => {
   display: block;
 }
 
-/* 模型进度条列表 */
 .models-progress-list {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -517,23 +609,24 @@ onUnmounted(() => {
   border-radius: 4px;
   text-transform: uppercase;
 }
+.model-logo { width: 24px; height: 24px; display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; }
+.model-logo .vendor-logo-img { width: 100%; height: 100%; object-fit: contain; }
 
-.model-badge.deepseek { background: #eff6ff; color: #1d4ed8; }
-.model-badge.moonshot { background: #fff1f2; color: #e11d48; }
-.model-badge.openai { background: #dcfce7; color: #15803d; }
-.model-badge.aliyun { background: #ccfbf1; color: #0f766e; }
+.default-badge { background: #f1f5f9; color: #64748b; }
+.deepseek-badge { background: #eff6ff; color: #1d4ed8; }
 
-/* 供应商图标 */
-.provider-icon {
-  flex-shrink: 0;
+.live-badge {
+  font-size: 0.625rem;
+  color: #16a34a;
+  background: #f0fdf4;
+  padding: 1px 5px;
+  border-radius: 3px;
+  white-space: nowrap;
 }
 
+.provider-icon { flex-shrink: 0; }
 .provider-icon.deepseek { color: #1d4ed8; }
-.provider-icon.moonshot { color: #e11d48; }
-.provider-icon.openai { color: #15803d; }
-.provider-icon.aliyun { color: #0f766e; }
 
-/* 进度条容器 */
 .progress-bars {
   display: flex;
   flex-direction: column;
@@ -583,15 +676,6 @@ onUnmounted(() => {
   background: linear-gradient(90deg, #10b981, #14b8a6);
 }
 
-.progress-fill.placeholder-bar {
-  background: transparent;
-}
-
-.progress-row.placeholder {
-  opacity: 0;
-  pointer-events: none;
-}
-
 .progress-text {
   font-size: 0.75rem;
   color: #64748b;
@@ -600,11 +684,7 @@ onUnmounted(() => {
   flex-shrink: 0;
 }
 
-/* 2. 中层大容器：折线与圆形图 */
-
-.charts-section {
-  container-type: inline-size;
-}
+.charts-section { container-type: inline-size; }
 
 .charts-grid {
   display: grid;
@@ -612,10 +692,10 @@ onUnmounted(() => {
   gap: 1.25rem;
 }
 
-.chart-card-header {
+.time-range-actions {
   display: flex;
-  justify-content: flex-end;
-  margin-bottom: 0.5rem;
+  align-items: center;
+  gap: 0.375rem;
 }
 
 .time-range-select {
@@ -635,6 +715,46 @@ onUnmounted(() => {
   border-color: #3b82f6;
 }
 
+.refresh-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  background: white;
+  cursor: pointer;
+  color: #64748b;
+  font-size: 0.875rem;
+  transition: border-color 0.2s, color 0.2s;
+  padding: 0;
+}
+
+.refresh-btn:hover:not(:disabled) {
+  border-color: #3b82f6;
+  color: #3b82f6;
+}
+
+.refresh-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.refresh-icon {
+  display: inline-block;
+  line-height: 1;
+}
+
+.refresh-icon.spinning {
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
 .chart-card {
   background: white;
   border-radius: 12px;
@@ -646,12 +766,8 @@ onUnmounted(() => {
   min-width: 0;
 }
 
-.chart-container {
-  width: 100%;
-  height: 100%;
-}
+.chart-container { width: 100%; height: 100%; }
 
-/* Token 消耗总量展示卡 */
 .total-card {
   background: white;
   border-radius: 12px;
@@ -696,13 +812,6 @@ onUnmounted(() => {
   border-top: 1px solid #f1f5f9;
 }
 
-.total-unit {
-  font-size: 0.8125rem;
-  color: #94a3b8;
-  font-weight: 500;
-}
-
-/* TOP3 列表 */
 .top3-list {
   display: flex;
   flex-direction: column;
@@ -739,6 +848,18 @@ onUnmounted(() => {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.top3-vendor {
+  font-size: 0.6875rem;
+  color: #94a3b8;
+  background: #f1f5f9;
+  padding: 1px 5px;
+  border-radius: 3px;
+  white-space: nowrap;
 }
 
 .top3-value {
@@ -749,128 +870,44 @@ onUnmounted(() => {
   flex-shrink: 0;
 }
 
-/* 小窗口：两图纵向堆叠 */
-@container (max-width: 53.9em) {
-  .charts-grid {
-    grid-template-columns: 1fr;
-  }
+.empty-hint { font-size: 0.8rem; color: #94a3b8; text-align: center; padding: 0.5rem 0; }
 
-  .chart-card {
-    height: 300px;
-  }
-}
-
-/* 3. 下层大容器：告警卡片 */
-.alert-card {
-  background: white;
-  border-radius: 12px;
-  padding: 1.25rem;
-  box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.05), 0 1px 2px -1px rgba(0, 0, 0, 0.05);
-}
-
-.card-header {
-  margin-bottom: 1rem;
-  border-bottom: 1px solid #f1f5f9;
-  padding-bottom: 0.75rem;
-}
-
-.card-title {
-  font-size: 1rem;
-  font-weight: 600;
-  color: #1e293b;
-  display: block;
-}
-
-.card-desc {
-  font-size: 0.8125rem;
+.empty-state {
+  text-align: center;
+  padding: 2rem 1rem;
   color: #94a3b8;
-  margin-top: 0.25rem;
+  font-size: 0.85rem;
 }
 
-.alert-list {
-  display: flex;
-  flex-direction: column;
-  gap: 0.75rem;
-}
-
-.alert-item {
+.error-notice {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  padding: 0.875rem 1.25rem;
+  gap: 0.5rem;
+  padding: 0.625rem 1rem;
+  background: #fef2f2;
+  border: 1px solid #fecaca;
   border-radius: 8px;
-  border: 1px solid transparent;
-  flex-wrap: wrap;
-  gap: 0.5rem;
-  transition: all 0.2s;
-}
-
-.alert-item.danger {
-  background-color: #fef2f2;
-  border-color: #fee2e2;
-}
-.alert-item.danger .status-indicator { background-color: #ef4444; }
-.alert-item.danger .quota-val { color: #ef4444; font-weight: 600; }
-
-.alert-item.warning {
-  background-color: #fffbeb;
-  border-color: #fef3c7;
-}
-.alert-item.warning .status-indicator { background-color: #f59e0b; }
-.alert-item.warning .quota-val { color: #d97706; font-weight: 600; }
-
-.alert-item.safe {
-  background-color: #f0fdf4;
-  border-color: #dcfce7;
-}
-.alert-item.safe .status-indicator { background-color: #22c55e; }
-.alert-item.safe .quota-val { color: #15803d; font-weight: 600; }
-
-.provider-info {
-  display: flex;
-  align-items: center;
-  gap: 0.625rem;
-  min-width: 140px;
-}
-
-.status-indicator {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-}
-
-.provider-name {
-  font-weight: 500;
-  color: #334155;
-  font-size: 0.9rem;
-}
-
-.quota-detail {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
+  color: #b91c1c;
   font-size: 0.8125rem;
-  flex-wrap: wrap;
+  margin-bottom: 0.5rem;
 }
 
-.quota-text { color: #64748b; }
-
-.threshold-tag {
-  background: rgba(0, 0, 0, 0.04);
-  color: #64748b;
-  padding: 0.125rem 0.5rem;
-  border-radius: 4px;
-  font-size: 0.75rem;
+.error-notice-icon {
+  flex-shrink: 0;
+  font-size: 1rem;
 }
 
-.badge {
-  font-size: 0.75rem;
-  padding: 0.25rem 0.75rem;
-  border-radius: 9999px;
-  font-weight: 500;
+.error-notice-text {
+  flex: 1;
+  line-height: 1.4;
 }
 
-.badge.danger { background-color: #fee2e2; color: #991b1b; }
-.badge.warning { background-color: #fef3c7; color: #92400e; }
-.badge.safe { background-color: #dcfce7; color: #166534; }
+@container (max-width: 53.9em) {
+  .charts-grid { grid-template-columns: 1fr; }
+  .chart-card { height: 300px; }
+}
+
+@media (max-width: 768px) {
+  .models-progress-list { grid-template-columns: 1fr; }
+}
 </style>

@@ -339,7 +339,7 @@ const saveGlobalConfig = () => {
         <div class="setting-row-item">
           <div class="setting-meta">
             <label class="setting-title">Claude Code 同步间隔</label>
-            <span class="setting-desc">本地 CLI 工具与日志文件分析频率，建议设置较短时间以实时响应。</span>
+            <span class="setting-desc">本地 CLI 工具与日志文件 analysis 频率，建议设置较短时间以实时响应。</span>
           </div>
           <div class="setting-control">
             <select v-model="syncConfig.claude_code_sync_interval_minutes" class="custom-select">
@@ -399,24 +399,25 @@ const saveGlobalConfig = () => {
   -webkit-app-region: no-drag;
 }
 
-/* 卡片统一包裹层 */
 .card-wrapper {
   background: #ffffff;
-  border-radius: 12px;
   border: 1px solid #e2e8f0;
-  padding: 1.25rem;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+  border-radius: 12px;
+  padding: 1.5rem;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.02), 0 1px 2px rgba(0, 0, 0, 0.04);
 }
 
 .settings-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  flex-wrap: wrap;
+  gap: 1rem;
 }
 
 .header-title h2 {
   font-size: 1.25rem;
-  font-weight: 700;
+  font-weight: 600;
   color: #0f172a;
   margin: 0 0 0.25rem 0;
 }
@@ -427,7 +428,6 @@ const saveGlobalConfig = () => {
   margin: 0;
 }
 
-/* 选项卡按钮组 */
 .tab-buttons {
   display: flex;
   background: #f1f5f9;
@@ -437,45 +437,52 @@ const saveGlobalConfig = () => {
 }
 
 .tab-btn {
-  padding: 8px 16px;
-  font-size: 0.85rem;
-  font-weight: 600;
-  color: #64748b;
   border: none;
   background: transparent;
+  padding: 6px 12px;
+  font-size: 0.85rem;
+  font-weight: 500;
+  color: #64748b;
   border-radius: 6px;
   cursor: pointer;
   transition: all 0.2s ease;
 }
 
+.tab-btn:hover {
+  color: #0f172a;
+}
+
 .tab-btn.active {
   background: #ffffff;
-  color: #2563eb;
+  color: #0f172a;
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
 }
 
 .section-desc-box {
   background: #f8fafc;
   border-left: 4px solid #3b82f6;
-  padding: 0.75rem 1rem;
-  border-radius: 4px;
-  font-size: 0.85rem;
-  color: #475569;
-  margin-bottom: 1.25rem;
+  padding: 10px 14px;
+  border-radius: 0 8px 8px 0;
+  margin-bottom: 1.5rem;
 }
 
-/* API Key 列表项 */
+.section-desc-box p {
+  margin: 0;
+  font-size: 0.85rem;
+  color: #475569;
+}
+
 .keys-list {
   display: flex;
   flex-direction: column;
-  gap: 1rem;
+  gap: 1.25rem;
 }
 
 .key-row-item {
   border: 1px solid #f1f5f9;
-  background: #fafafa;
   border-radius: 8px;
   padding: 1rem;
+  background: #f8fafc;
 }
 
 .row-header {
@@ -485,31 +492,43 @@ const saveGlobalConfig = () => {
   margin-bottom: 0.75rem;
 }
 
+.service-identity {
+  display: flex;
+  flex-direction: column;
+}
+
 .service-name {
-  font-weight: 700;
   font-size: 0.95rem;
-  color: #1e293b;
-  margin-right: 8px;
+  font-weight: 600;
+  color: #0f172a;
 }
 
 .service-provider {
   font-size: 0.75rem;
-  background: #e2e8f0;
-  color: #475569;
-  padding: 2px 6px;
-  border-radius: 4px;
+  color: #94a3b8;
 }
 
 .status-badge {
   font-size: 0.75rem;
   padding: 2px 8px;
   border-radius: 12px;
-  font-weight: 600;
+  font-weight: 500;
 }
 
-.badge-muted { background: #e2e8f0; color: #64748b; }
-.badge-success { background: #dcfce7; color: #166534; }
-.badge-danger { background: #fee2e2; color: #991b1b; }
+.badge-muted {
+  background: #e2e8f0;
+  color: #64748b;
+}
+
+.badge-success {
+  background: #dcfce7;
+  color: #166534;
+}
+
+.badge-danger {
+  background: #fee2e2;
+  color: #991b1b;
+}
 
 .input-control-group {
   display: flex;
@@ -531,35 +550,62 @@ const saveGlobalConfig = () => {
 .key-input:focus {
   outline: none;
   border-color: #3b82f6;
+  box-shadow: 0 0 0 1px #3b82f6;
 }
 
 .btn-icon {
-  border: 1px solid #cbd5e1;
   background: #ffffff;
-  padding: 6px 10px;
+  border: 1px solid #cbd5e1;
   border-radius: 6px;
+  width: 36px;
+  height: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   cursor: pointer;
+  font-size: 1rem;
+}
+
+.btn-icon:hover {
+  background: #f1f5f9;
 }
 
 .btn-primary-action {
-  background: #2563eb;
+  background: #3b82f6;
   color: #ffffff;
   border: none;
-  padding: 8px 14px;
   border-radius: 6px;
-  font-size: 0.8rem;
-  font-weight: 600;
+  padding: 0 16px;
+  height: 36px;
+  font-size: 0.85rem;
+  font-weight: 500;
   cursor: pointer;
+  transition: background 0.2s;
+}
+
+.btn-primary-action:hover:not(:disabled) {
+  background: #2563eb;
+}
+
+.btn-primary-action:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
 }
 
 .btn-danger-action {
   background: #ef4444;
   color: #ffffff;
   border: none;
-  padding: 8px 12px;
   border-radius: 6px;
-  font-size: 0.8rem;
+  padding: 0 16px;
+  height: 36px;
+  font-size: 0.85rem;
+  font-weight: 500;
   cursor: pointer;
+}
+
+.btn-danger-action:hover {
+  background: #dc2626;
 }
 
 .error-msg-detail {
@@ -568,44 +614,56 @@ const saveGlobalConfig = () => {
   margin-top: 6px;
 }
 
+.csv-file-input {
+  display: none;
+}
+
 .csv-import-area {
-  margin-top: 0.75rem;
-  padding: 0.75rem;
-  background: #eff6ff;
-  border: 1px dashed #93c5fd;
-  border-radius: 6px;
+  margin-top: 1rem;
+  padding-top: 1rem;
+  border-top: 1px dashed #e2e8f0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
 }
 
 .csv-info p {
+  margin: 0;
   font-size: 0.75rem;
-  color: #1e40af;
-  margin: 0 0 8px 0;
+  color: #64748b;
+  line-height: 1.4;
 }
 
 .btn-csv-upload {
-  background: #ffffff;
-  border: 1px solid #93c5fd;
-  color: #1d4ed8;
+  background: #f1f5f9;
+  border: 1px solid #cbd5e1;
+  color: #475569;
+  border-radius: 6px;
   padding: 6px 12px;
-  border-radius: 4px;
   font-size: 0.75rem;
-  font-weight: 600;
+  font-weight: 500;
   cursor: pointer;
 }
 
-.csv-file-input { display: none; }
-
-.csv-hint-text {
-  font-size: 0.75rem;
-  margin-top: 6px;
-  color: #15803d;
+.btn-csv-upload:hover {
+  background: #e2e8f0;
+  color: #0f172a;
 }
 
-/* 同步与偏好设置列表 */
+.csv-hint-text {
+  margin: 4px 0 0 0;
+  font-size: 0.75rem;
+  color: #ef4444;
+}
+
+.csv-hint-text.success {
+  color: #166534;
+}
+
 .setting-list {
   display: flex;
   flex-direction: column;
-  gap: 1.25rem;
+  gap: 1.5rem;
 }
 
 .setting-row-item {
@@ -616,21 +674,28 @@ const saveGlobalConfig = () => {
   border-bottom: 1px solid #f1f5f9;
 }
 
+.setting-row-item:last-child {
+  border-bottom: none;
+  padding-bottom: 0;
+}
+
 .setting-meta {
   display: flex;
   flex-direction: column;
   gap: 4px;
+  max-width: 70%;
 }
 
 .setting-title {
-  font-weight: 600;
   font-size: 0.95rem;
-  color: #1e293b;
+  font-weight: 600;
+  color: #0f172a;
 }
 
 .setting-desc {
   font-size: 0.8rem;
   color: #64748b;
+  line-height: 1.4;
 }
 
 .custom-select {
@@ -643,7 +708,11 @@ const saveGlobalConfig = () => {
   -webkit-app-region: no-drag;
 }
 
-/* 开关 Toggle 组件 */
+.custom-select:focus {
+  outline: none;
+  border-color: #3b82f6;
+}
+
 .toggle-switch {
   position: relative;
   display: inline-block;
@@ -652,14 +721,21 @@ const saveGlobalConfig = () => {
   -webkit-app-region: no-drag;
 }
 
-.toggle-switch input { opacity: 0; width: 0; height: 0; }
+.toggle-switch input {
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
 
 .switch-slider {
   position: absolute;
   cursor: pointer;
-  top: 0; left: 0; right: 0; bottom: 0;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
   background-color: #cbd5e1;
-  transition: .3s;
+  transition: 0.3s;
   border-radius: 24px;
 }
 
@@ -671,52 +747,54 @@ const saveGlobalConfig = () => {
   left: 3px;
   bottom: 3px;
   background-color: white;
-  transition: .3s;
+  transition: 0.3s;
   border-radius: 50%;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.15);
 }
 
-input:checked + .switch-slider { background-color: #2563eb; }
-input:checked + .switch-slider:before { transform: translateX(20px); }
+input:checked + .switch-slider {
+  background-color: #10b981;
+}
+
+input:checked + .switch-slider:before {
+  transform: translateX(20px);
+}
 
 .save-footer {
   margin-top: 1.5rem;
+  padding-top: 1.25rem;
+  border-top: 1px solid #f1f5f9;
   display: flex;
   justify-content: flex-end;
 }
 
 .btn-save-all {
-  background: #2563eb;
+  background: #10b981;
   color: #ffffff;
   border: none;
-  padding: 10px 24px;
-  border-radius: 8px;
-  font-weight: 600;
-  font-size: 0.9rem;
+  border-radius: 6px;
+  padding: 8px 20px;
+  font-size: 0.85rem;
+  font-weight: 500;
   cursor: pointer;
+  transition: background 0.2s;
 }
 
-.btn-save-all:hover { background: #1d4ed8; }
+.btn-save-all:hover:not(:disabled) {
+  background: #059669;
+}
+
+.btn-save-all:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
 
 .animate-fade-in {
-  animation: fadeIn 0.25s ease-in-out;
+  animation: fadeIn 0.2s ease-out forwards;
 }
 
 @keyframes fadeIn {
   from { opacity: 0; transform: translateY(4px); }
   to { opacity: 1; transform: translateY(0); }
-}
-</style>
-
-<!-- 暗黑模式的最轻量级选择器控制，无需改动全局 style.css -->
-<style>
-html.dark-mode {
-  filter: invert(0.9) hue-rotate(180deg);
-}
-
-html.dark-mode img,
-html.dark-mode svg,
-html.dark-mode .chart-box,
-html.dark-mode canvas {
-  filter: invert(1.1) hue-rotate(180deg);
 }
 </style>
