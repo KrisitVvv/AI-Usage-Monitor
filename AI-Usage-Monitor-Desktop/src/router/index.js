@@ -11,14 +11,14 @@ const routes = [
     component: () => import('../components/pages/WorkbenchPage.vue')
   },
   {
-    path: '/projects',
-    name: 'projects',
-    component: () => import('../components/pages/ProjectsPage.vue')
-  },
-  {
     path: '/progress',
     name: 'progress',
     component: () => import('../components/pages/ProgressPage.vue')
+  },
+  {
+    path: '/progress/:id',
+    name: 'model-detail',
+    component: () => import('../components/pages/ModelDetailPage.vue')
   },
   {
     path: '/settings',

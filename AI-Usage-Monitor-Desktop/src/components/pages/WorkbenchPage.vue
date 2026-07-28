@@ -726,7 +726,7 @@ onUnmounted(() => {
 }
 
 /* 小窗口：两图纵向堆叠 */
-@container (max-width: 863px) {
+@container (max-width: 53.9em) {
   .charts-grid {
     grid-template-columns: 1fr;
   }
