@@ -27,10 +27,10 @@ function createWindow() {
   })
 
   // 开发模式下加载 Vite 服务器
-  mainWindow.loadURL('http://localhost:5173')
+    mainWindow.loadURL('http://localhost:5173')
 
   // 可选：打开 DevTools
-   mainWindow.webContents.openDevTools()
+   //mainWindow.webContents.openDevTools()
 }
 
 app.whenReady().then(() => {
