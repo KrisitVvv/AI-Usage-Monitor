@@ -1,26 +1,128 @@
 <script setup>
-import { ref, computed } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
-import { modelList, MODEL_COLORS } from '../../mock/modelData.js'
+import AddVendorModal from '../AddVendorModal.vue'
 
 const router = useRouter()
 const loading = ref(true)
-const searchQuery = ref('')
+const showAddModal = ref(false)
+const realtimeUsage = ref({ vendors: [], errors: [], lastCollect: null, deepseekBalance: null })
+let unsubscribe = null
 
-const planModels = computed(() =>
-  modelList.filter(m => m.billingModel === 'plan' && matchesSearch(m))
-)
+// ---------- 工具函数 ----------
+const PALETTE = ['#3b82f6', '#10b981', '#f59e0b', '#8b5cf6', '#ef4444', '#ec4899', '#06b6d4', '#f97316', '#84cc16', '#6366f1']
 
-const tokenModels = computed(() =>
-  modelList.filter(m => m.billingModel === 'token' && matchesSearch(m))
-)
+function vendorColor(name) {
+  let hash = 0
+  for (let i = 0; i < name.length; i++) hash = ((hash << 5) - hash) + name.charCodeAt(i)
+  return PALETTE[Math.abs(hash) % PALETTE.length]
+}
 
-function matchesSearch(model) {
-  if (!searchQuery.value.trim()) return true
-  const q = searchQuery.value.trim().toLowerCase()
-  return model.name.toLowerCase().includes(q) ||
-    model.provider.toLowerCase().includes(q) ||
-    model.type.toLowerCase().includes(q)
+function shortName(provider) {
+  const map = {
+    'DeepSeek API': 'DeepSeek', 'OpenAI API': 'OpenAI', 'Kimi API': 'Kimi',
+    'Aliyun API': '阿里云', '智谱 AI': 'GLM', 'Anthropic': 'Claude',
+    'Google AI': 'Gemini', 'Stability AI': 'SDXL', '百度文心': '文心', '科大讯飞': '讯飞'
+  }
+  return map[provider] || provider
+}
+
+// ---------- 从实时数据构建卡片列表 ----------
+const mergedModelList = computed(() => {
+  const balances = realtimeUsage.value.deepseekBalances || {}
+  const fallbackBalance = realtimeUsage.value.deepseekBalance
+  const savedVendors = realtimeUsage.value.vendors || []
+  if (!savedVendors.length) return []
+
+  return savedVendors.map(v => {
+    const isDeepSeek = v.provider === 'DeepSeek API'
+    // 按 vendor ID 查找 balance，找不到则用全局 fallback
+    const balanceData = isDeepSeek ? (balances[v.id] || fallbackBalance) : null
+    const hasBalance = isDeepSeek && balanceData
+    const base = {
+      id: v.id,
+      name: v.customName || shortName(v.provider),
+      provider: v.provider,
+      billingModel: v.billingModel,
+      color: vendorColor(v.provider),
+      _live: hasBalance && !balanceData._stale,
+      _stale: hasBalance && !!balanceData._stale,
+      _deepseekAvailable: hasBalance ? balanceData.is_available : false
+    }
+
+    if (hasBalance) {
+      const totalBudget = balanceData.totalBudget || 0
+      const remaining = balanceData.remaining || 0
+      const spent = balanceData.spent || 0
+      const usedPercent = balanceData.usedPercent ?? (totalBudget > 0 ? Math.round((spent / totalBudget) * 100) : 0)
+
+      if (v.billingModel === 'plan') {
+        base.allowance = {
+          planName: 'DeepSeek 余额',
+          remainingTokens: remaining,
+          planTokensTotal: totalBudget,
+          planTokensUsed: spent,
+          planCost: `¥${totalBudget.toFixed(2)}`,
+          usedPercent,
+          nextRenewal: '—'
+        }
+      } else {
+        base.allowance = {
+          totalBudget, spent, remaining,
+          currency: balanceData.currency === 'CNY' ? '¥' : '$',
+          usedPercent,
+          billingCycle: balanceData.is_available ? '可用' : '不可用'
+        }
+      }
+    } else {
+      // 无实时数据 — 显示占位
+      if (v.billingModel === 'plan') {
+        base.allowance = {
+          planName: '等待数据...',
+          remainingTokens: 0, planTokensTotal: 0, planTokensUsed: 0,
+          planCost: '—', usedPercent: 0, nextRenewal: '—'
+        }
+      } else {
+        base.allowance = {
+          totalBudget: 0, spent: 0, remaining: 0,
+          currency: '¥', usedPercent: 0, billingCycle: '等待数据...'
+        }
+      }
+    }
+    return base
+  })
+})
+
+const planModels = computed(() => mergedModelList.value.filter(m => m.billingModel === 'plan'))
+const tokenModels = computed(() => mergedModelList.value.filter(m => m.billingModel === 'token'))
+
+const lastUpdate = computed(() => {
+  const t = realtimeUsage.value.lastCollect
+  return t ? new Date(t).toLocaleTimeString('zh-CN') : ''
+})
+const fetchErrors = computed(() => realtimeUsage.value.errors || [])
+
+function onVendorSaved() { showAddModal.value = false }
+
+// ---------- 处理来自 ModelDetailPage 的重命名通知 ----------
+function applyPendingRenames() {
+  try {
+    const pending = JSON.parse(localStorage.getItem('pendingVendorRenames') || '[]')
+    if (!pending.length) return
+    const vendors = realtimeUsage.value.vendors || []
+    let changed = false
+    for (const { vendorId, customName } of pending) {
+      const v = vendors.find(vendor => vendor.id === vendorId)
+      if (v && v.customName !== customName) {
+        v.customName = customName
+        changed = true
+      }
+    }
+    if (changed) {
+      realtimeUsage.value = { ...realtimeUsage.value, vendors: [...vendors] }
+    }
+    localStorage.removeItem('pendingVendorRenames')
+  } catch { /* 忽略 */ }
 }
 
 const goToDetail = (id) => router.push({ name: 'model-detail', params: { id } })
@@ -31,18 +133,32 @@ function formatTokens(n) {
   if (n >= 1_000) return (n / 1_000).toFixed(1) + 'K'
   return n.toLocaleString()
 }
-
 function formatMoney(n, currency) {
-  return currency + n.toFixed(2)
+  if (currency) return currency + Number(n || 0).toFixed(2)
+  return '$' + Number(n || 0).toFixed(2)
 }
-
 function usageClass(pct) {
   if (pct >= 90) return 'danger'
   if (pct >= 75) return 'warning'
   return 'safe'
 }
 
-setTimeout(() => { loading.value = false }, 600)
+// ---------- 生命周期 ----------
+onMounted(async () => {
+  if (window.electronAPI) {
+    try {
+      const cached = await window.electronAPI.getUsageData()
+      if (cached) realtimeUsage.value = { ...realtimeUsage.value, ...cached }
+    } catch { /* 忽略 */ }
+    // 处理来自详情页的重命名通知（在获取数据后、订阅前）
+    applyPendingRenames()
+    unsubscribe = window.electronAPI.onUsageDataUpdated((data) => {
+      realtimeUsage.value = { ...realtimeUsage.value, ...data }
+    })
+  }
+  setTimeout(() => { loading.value = false }, 600)
+})
+onUnmounted(() => { if (typeof unsubscribe === 'function') unsubscribe() })
 </script>
 
 <template>
@@ -50,15 +166,30 @@ setTimeout(() => { loading.value = false }, 600)
     <div class="toolbar">
       <div class="toolbar-left">
         <h2 class="page-title">额度管理</h2>
-        <span class="model-count">{{ modelList.length }} 个供应商</span>
+        <span class="model-count">{{ mergedModelList.length }} 个供应商</span>
       </div>
       <div class="toolbar-right">
-        <div class="search-box">
-          <svg class="search-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
+        <button class="add-vendor-btn" @click="showAddModal = true">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
           </svg>
-          <input v-model="searchQuery" class="search-input" type="text" placeholder="搜索厂商 / 模型名称..." />
-        </div>
+          添加供应商
+        </button>
+      </div>
+    </div>
+
+    <!-- 状态栏：最后更新时间 / 错误提示 -->
+    <div class="status-bar" v-if="lastUpdate || fetchErrors.length">
+      <div class="status-left" v-if="lastUpdate">
+        <span class="status-dot-live"></span>
+        <span class="status-text">实时数据</span>
+        <span class="status-time">上次更新: {{ lastUpdate }}</span>
+        <span class="status-interval">(每 30s 自动刷新)</span>
+      </div>
+      <div class="status-errors" v-if="fetchErrors.length">
+        <span v-for="(err, i) in fetchErrors.slice(0, 2)" :key="i" class="status-error-item">
+          {{ err }}
+        </span>
       </div>
     </div>
 
@@ -84,11 +215,18 @@ setTimeout(() => { loading.value = false }, 600)
             @click="goToDetail(m.id)"
           >
             <div class="card-row-top">
-              <div class="vendor-avatar" :style="{ backgroundColor: MODEL_COLORS[m.name] || '#64748b' }">
+              <div v-if="m.provider === 'DeepSeek API'" class="vendor-avatar vendor-avatar-img">
+                <img class="vendor-logo-img" src="/deepseek.png" alt="DeepSeek" />
+              </div>
+              <div v-else class="vendor-avatar" :style="{ backgroundColor: m.color }">
                 <span class="avatar-letter">{{ m.name.charAt(0) }}</span>
               </div>
               <div class="vendor-info">
-                <h3 class="vendor-name">{{ m.name }}</h3>
+                <h3 class="vendor-name">
+                  {{ m.name }}
+                  <span v-if="m._stale" class="data-badge stale" title="使用缓存数据">缓存</span>
+                  <span v-else-if="m._live" class="data-badge live" title="实时数据">实时</span>
+                </h3>
                 <p class="vendor-provider">{{ m.provider }}</p>
               </div>
             </div>
@@ -96,10 +234,19 @@ setTimeout(() => { loading.value = false }, 600)
             <!-- 订阅额度条 -->
             <div class="allowance-bar-wrap">
               <div class="allowance-bar-top">
-                <span class="allowance-label">{{ m.allowance.planName }}</span>
-                <span class="allowance-value">
-                  {{ formatTokens(m.allowance.remainingTokens) }} / {{ formatTokens(m.allowance.planTokensTotal) }} tokens
-                </span>
+                <!-- DeepSeek 实时余额 -->
+                <template v-if="m.provider === 'DeepSeek API' && m._live">
+                  <span class="allowance-label">账户余额</span>
+                  <span class="allowance-value">
+                    {{ formatMoney(m.allowance.remainingTokens, '¥') }} / {{ formatMoney(m.allowance.planTokensTotal, '¥') }}
+                  </span>
+                </template>
+                <template v-else>
+                  <span class="allowance-label">{{ m.allowance.planName }}</span>
+                  <span class="allowance-value">
+                    {{ formatTokens(m.allowance.remainingTokens) }} / {{ formatTokens(m.allowance.planTokensTotal) }} tokens
+                  </span>
+                </template>
               </div>
               <div class="allowance-track">
                 <div
@@ -109,8 +256,17 @@ setTimeout(() => { loading.value = false }, 600)
               </div>
               <div class="allowance-bar-bottom">
                 <span>已用 {{ m.allowance.usedPercent }}%</span>
-                <span>下次续费 {{ m.allowance.nextRenewal }}</span>
+                <span v-if="m.provider === 'DeepSeek API' && m._live" class="allowance-status">
+                  {{ m._deepseekAvailable ? '正常' : '异常' }}
+                </span>
+                <span v-else>下次续费 {{ m.allowance.nextRenewal }}</span>
               </div>
+            </div>
+
+            <!-- DeepSeek 未登录提示 -->
+            <div v-if="m.provider === 'DeepSeek API' && !m._live" class="deepseek-login-warning">
+              <span class="warning-icon">!</span>
+              <span>未登录 DeepSeek，点击供应商卡片前往登录</span>
             </div>
 
             <div class="card-meta">
@@ -119,8 +275,8 @@ setTimeout(() => { loading.value = false }, 600)
                 <span class="meta-value mono">{{ m.allowance.planCost }}</span>
               </div>
               <div class="meta-slot">
-                <span class="meta-label">请求数</span>
-                <span class="meta-value">{{ m.performance.totalRequests.toLocaleString() }}</span>
+                <span class="meta-label">状态</span>
+                <span class="meta-value">{{ m._live ? '实时' : m._stale ? '缓存' : '—' }}</span>
               </div>
             </div>
           </div>
@@ -143,11 +299,18 @@ setTimeout(() => { loading.value = false }, 600)
             @click="goToDetail(m.id)"
           >
             <div class="card-row-top">
-              <div class="vendor-avatar" :style="{ backgroundColor: MODEL_COLORS[m.name] || '#64748b' }">
+              <div v-if="m.provider === 'DeepSeek API'" class="vendor-avatar vendor-avatar-img">
+                <img class="vendor-logo-img" src="/deepseek.png" alt="DeepSeek" />
+              </div>
+              <div v-else class="vendor-avatar" :style="{ backgroundColor: m.color }">
                 <span class="avatar-letter">{{ m.name.charAt(0) }}</span>
               </div>
               <div class="vendor-info">
-                <h3 class="vendor-name">{{ m.name }}</h3>
+                <h3 class="vendor-name">
+                  {{ m.name }}
+                  <span v-if="m._stale" class="data-badge stale" title="使用缓存数据">缓存</span>
+                  <span v-else-if="m._live" class="data-badge live" title="实时数据">实时</span>
+                </h3>
                 <p class="vendor-provider">{{ m.provider }}</p>
               </div>
             </div>
@@ -172,14 +335,20 @@ setTimeout(() => { loading.value = false }, 600)
               </div>
             </div>
 
+            <!-- DeepSeek 未登录提示 -->
+            <div v-if="m.provider === 'DeepSeek API' && !m._live" class="deepseek-login-warning">
+              <span class="warning-icon">!</span>
+              <span>未登录 DeepSeek，点击供应商卡片前往登录</span>
+            </div>
+
             <div class="card-meta">
               <div class="meta-slot">
                 <span class="meta-label">已消费</span>
                 <span class="meta-value mono">{{ formatMoney(m.allowance.spent, m.allowance.currency) }}</span>
               </div>
               <div class="meta-slot">
-                <span class="meta-label">请求数</span>
-                <span class="meta-value">{{ m.performance.totalRequests.toLocaleString() }}</span>
+                <span class="meta-label">状态</span>
+                <span class="meta-value">{{ m._live ? '实时' : m._stale ? '缓存' : '—' }}</span>
               </div>
             </div>
           </div>
@@ -194,6 +363,12 @@ setTimeout(() => { loading.value = false }, 600)
       </div>
     </template>
   </div>
+
+  <AddVendorModal
+    v-if="showAddModal"
+    @close="showAddModal = false"
+    @saved="onVendorSaved"
+  />
 </template>
 
 <style scoped>
@@ -203,11 +378,24 @@ setTimeout(() => { loading.value = false }, 600)
 .toolbar-left { display: flex; align-items: center; gap: 0.75rem; margin-left: 0.5rem; }
 .page-title { font-size: 1.25rem; font-weight: 700; color: #1e293b; margin: 0; }
 .model-count { font-size: 0.75rem; color: #94a3b8; background: #f1f5f9; padding: 0.2rem 0.6rem; border-radius: 999px; }
-.search-box { position: relative; display: flex; align-items: center; }
-.search-icon { position: absolute; left: 0.75rem; color: #94a3b8; pointer-events: none; }
-.search-input { padding: 0.45rem 0.75rem 0.45rem 2.2rem; border: 1px solid #e2e8f0; border-radius: 8px; font-size: 0.8125rem; color: #1e293b; background: white; outline: none; width: 220px; transition: border-color 0.2s, box-shadow 0.2s; }
-.search-input:focus { border-color: #4675ED; box-shadow: 0 0 0 3px rgba(70,117,237,.1); }
-.search-input::placeholder { color: #94a3b8; }
+.add-vendor-btn { display: inline-flex; align-items: center; gap: 0.4rem; padding: 0.5rem 1rem; background: #4675ED; color: white; border: none; border-radius: 8px; font-size: 0.8125rem; font-weight: 500; cursor: pointer; transition: background 0.2s, box-shadow 0.2s; white-space: nowrap; }
+.add-vendor-btn:hover { background: #3b5fd9; box-shadow: 0 4px 12px rgba(70,117,237,.25); }
+
+/* Status bar */
+.status-bar { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 0.5rem; padding: 0.45rem 0.75rem; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; font-size: 0.7rem; color: #64748b; flex-shrink: 0; }
+.status-left { display: flex; align-items: center; gap: 0.4rem; }
+.status-dot-live { width: 7px; height: 7px; border-radius: 50%; background: #22c55e; animation: pulse-dot 2s ease-in-out infinite; }
+@keyframes pulse-dot { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+.status-text { font-weight: 600; color: #16a34a; }
+.status-time { color: #64748b; }
+.status-interval { color: #94a3b8; }
+.status-errors { display: flex; gap: 0.5rem; flex-wrap: wrap; }
+.status-error-item { color: #dc2626; font-size: 0.65rem; max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Data source badge */
+.data-badge { font-size: 0.58rem; font-weight: 600; padding: 0.1rem 0.4rem; border-radius: 4px; vertical-align: middle; margin-left: 0.35rem; }
+.data-badge.live { background: #f0fdf4; color: #16a34a; }
+.data-badge.stale { background: #fef3c7; color: #d97706; }
 
 /* Section header */
 .model-section { display: flex; flex-direction: column; gap: 0.75rem; width: 100%; }
@@ -232,6 +420,8 @@ setTimeout(() => { loading.value = false }, 600)
 .card-row-top { display: flex; align-items: center; gap: 0.75rem; }
 .vendor-avatar { width: 40px; height: 40px; border-radius: 10px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
 .avatar-letter { color: white; font-weight: 700; font-size: 1.05rem; }
+.vendor-avatar-img { background: #eff6ff !important; overflow: hidden; }
+.vendor-logo-img { width: 100%; height: 100%; object-fit: contain; padding: 6px; box-sizing: border-box; }
 .vendor-info { flex: 1; min-width: 0; }
 .vendor-name { font-size: 0.95rem; font-weight: 600; color: #1e293b; margin: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .vendor-provider { font-size: 0.72rem; color: #94a3b8; margin: 0.125rem 0 0; }
@@ -247,6 +437,7 @@ setTimeout(() => { loading.value = false }, 600)
 .usage-warning .allowance-fill { background: linear-gradient(90deg, #f59e0b, #fbbf24); }
 .usage-danger .allowance-fill { background: linear-gradient(90deg, #ef4444, #f87171); }
 .allowance-bar-bottom { display: flex; justify-content: space-between; font-size: 0.68rem; color: #94a3b8; }
+.allowance-status { font-weight: 500; color: #16a34a; }
 
 /* Card meta */
 .card-meta { display: flex; gap: 1.5rem; }
@@ -260,9 +451,36 @@ setTimeout(() => { loading.value = false }, 600)
 .spinner { width: 36px; height: 36px; border: 3px solid #e2e8f0; border-top-color: #4675ED; border-radius: 50%; animation: spin .8s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
+/* DeepSeek 登录警告 */
+.deepseek-login-warning {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.375rem 0.625rem;
+  background: #fefce8;
+  border: 1px solid #fde68a;
+  border-radius: 6px;
+  font-size: 0.68rem;
+  color: #92400e;
+  margin-top: 0.25rem;
+}
+.warning-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  background: #f59e0b;
+  color: white;
+  border-radius: 50%;
+  font-size: 0.6rem;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+
 @media (max-width: 768px) {
   .toolbar { flex-direction: column; align-items: stretch; }
-  .search-input { width: 100%; }
+  .add-vendor-btn { justify-content: center; }
   .vendor-grid { grid-template-columns: 1fr; }
 }
 </style>
