@@ -53,6 +53,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getAutoLaunch: () => ipcRenderer.invoke('get-auto-launch'),
   setAutoLaunch: (enable) => ipcRenderer.invoke('set-auto-launch', enable),
 
+  // ---------- 缩小到系统托盘 ----------
+  getMinimizeToTray: () => ipcRenderer.invoke('get-minimize-to-tray'),
+  setMinimizeToTray: (enable) => ipcRenderer.invoke('set-minimize-to-tray', enable),
+
+  // ---------- 打开外部链接 ----------
+  openExternal: (url) => ipcRenderer.invoke('open-external', url),
+
   // ---------- 供 main world 拦截脚本调用的记录接口 ----------
   // 由 main.js 注入的 fetch/XHR 拦截器在检测到
   // DeepSeek Chat API 响应中的 usage 字段后调用此方法

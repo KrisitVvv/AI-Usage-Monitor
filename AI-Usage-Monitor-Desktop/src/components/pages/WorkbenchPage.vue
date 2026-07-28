@@ -32,7 +32,7 @@ async function manualRefresh() {
   } catch (e) {
     console.warn('[Workbench] 手动刷新失败:', e.message)
   } finally {
-    setTimeout(() => { manualRefreshing.value = false }, 2000)
+    setTimeout(() => { manualRefreshing.value = false }, 6000)
   }
 }
 
@@ -109,15 +109,22 @@ function buildChartData() {
   let buckets = [] // [{ label, models: { model: tokens } }]
 
   if (range === 'today') {
-    // 小时粒度
+    // 小时粒度 — 展示完整 24 小时（00:00~23:00），无数据的时段显示 0
     const dayOfWeek = new Date().getDay()
     const dayNames = ['周日', '周一', '周二', '周三', '周四', '周五', '周六']
-    xData = hourlyDeltas.map(d => d.hour)
-    buckets = hourlyDeltas.map(d => ({
-      label: d.hour,
-      models: d.models || {}
+    const hourMap = {}
+    for (const d of hourlyDeltas) {
+      hourMap[d.hour] = d.models || {}
+    }
+    const allHours = []
+    for (let h = 0; h < 24; h++) {
+      allHours.push(String(h).padStart(2, '0') + ':00')
+    }
+    xData = allHours.map(h => h === allHours[0] ? dayNames[dayOfWeek] + ' ' + h : h)
+    buckets = allHours.map(h => ({
+      label: h,
+      models: hourMap[h] || {}
     }))
-    if (xData.length > 0) xData[0] = dayNames[dayOfWeek] + ' ' + xData[0]
   } else if (range === 'week') {
     // 天粒度（最近 7 天）
     const recent7 = dailySummary.slice(-7)

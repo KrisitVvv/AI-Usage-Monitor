@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, session } = require('electron')
+const { app, BrowserWindow, ipcMain, session, Tray, Menu, nativeImage, shell } = require('electron')
 const path = require('path')
 const fs = require('fs')
 const { collectAll, recordTokenUsage, getTokenStats, resetDeepSeekBudget, flushTokenStats, loadTokenStats, recordHourlySnapshot, getPrevModelTokens } = require('./usage-collector')
@@ -42,6 +42,66 @@ function createWindow() {
 }
 
 const VENDORS_FILE = path.join(app.getPath('userData'), 'vendors.json')
+const SETTINGS_FILE = path.join(app.getPath('userData'), 'settings.json')
+
+// 系统托盘实例
+let tray = null
+
+// 读取设置
+function readSettings() {
+  try {
+    if (!fs.existsSync(SETTINGS_FILE)) return { minimizeToTray: true }
+    const raw = fs.readFileSync(SETTINGS_FILE, 'utf-8')
+    return JSON.parse(raw)
+  } catch {
+    return { minimizeToTray: true }
+  }
+}
+
+// 写入设置
+function writeSettings(settings) {
+  const dir = path.dirname(SETTINGS_FILE)
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
+  fs.writeFileSync(SETTINGS_FILE, JSON.stringify(settings, null, 2), 'utf-8')
+}
+
+// 创建系统托盘
+function createTray() {
+  const iconPath = path.join(__dirname, '..', 'public', 'square_logo.png')
+  const icon = nativeImage.createFromPath(iconPath)
+  tray = new Tray(icon)
+  tray.setToolTip('AI Usage Monitor')
+
+  const contextMenu = Menu.buildFromTemplate([
+    {
+      label: '显示窗口',
+      click: () => {
+        if (mainWindow) {
+          mainWindow.show()
+          mainWindow.focus()
+        }
+      }
+    },
+    { type: 'separator' },
+    {
+      label: '退出',
+      click: () => {
+        isQuitting = true
+        app.quit()
+      }
+    }
+  ])
+
+  tray.setContextMenu(contextMenu)
+
+  // 左键点击显示窗口
+  tray.on('click', () => {
+    if (mainWindow) {
+      mainWindow.show()
+      mainWindow.focus()
+    }
+  })
+}
 
 function readVendors() {
   try {
@@ -62,6 +122,7 @@ function writeVendors(vendors) {
 app.whenReady().then(() => {
   loadTokenStats()
   createWindow()
+  createTray()
 
   ipcMain.on('window-minimize', (event) => {
     BrowserWindow.fromWebContents(event.sender)?.minimize()
@@ -75,7 +136,14 @@ app.whenReady().then(() => {
     }
   })
   ipcMain.on('window-close', (event) => {
-    BrowserWindow.fromWebContents(event.sender)?.close()
+    const win = BrowserWindow.fromWebContents(event.sender)
+    if (!win) return
+    const settings = readSettings()
+    if (settings.minimizeToTray) {
+      win.hide()
+    } else {
+      win.close()
+    }
   })
 
   // 供应商数据存储 IPC
@@ -343,6 +411,41 @@ app.whenReady().then(() => {
       return { success: true, enabled: !!enable }
     } catch (e) {
       console.error('[Main] 设置开机自启动失败:', e.message)
+      return { success: false, error: e.message }
+    }
+  })
+
+  // ---------- 缩小到系统托盘 ----------
+  ipcMain.handle('get-minimize-to-tray', () => {
+    try {
+      const settings = readSettings()
+      return settings.minimizeToTray !== false
+    } catch (e) {
+      console.error('[Main] 获取系统托盘设置失败:', e.message)
+      return true
+    }
+  })
+
+  ipcMain.handle('set-minimize-to-tray', (_event, enable) => {
+    try {
+      const settings = readSettings()
+      settings.minimizeToTray = !!enable
+      writeSettings(settings)
+      console.log('[Main] 缩小到系统托盘:', enable ? '已开启' : '已关闭')
+      return { success: true, enabled: !!enable }
+    } catch (e) {
+      console.error('[Main] 设置系统托盘失败:', e.message)
+      return { success: false, error: e.message }
+    }
+  })
+
+  // ---------- 打开外部链接 ----------
+  ipcMain.handle('open-external', (_event, url) => {
+    try {
+      shell.openExternal(url)
+      return { success: true }
+    } catch (e) {
+      console.error('[Main] 打开外部链接失败:', e.message)
       return { success: false, error: e.message }
     }
   })

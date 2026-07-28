@@ -7,6 +7,7 @@
  */
 
 const { BrowserWindow, session } = require('electron')
+const path = require('path')
 
 const DEEPSEEK_USAGE_URL = 'https://platform.deepseek.com/usage'
 const POLL_INTERVAL_MS = 60 * 60 * 1000 // 1 小时
@@ -64,7 +65,8 @@ class DeepSeekMonitor {
 
   createMonitorWindow() {
     this.monitorWindow = new BrowserWindow({
-      width: 1200, height: 800, show: false,
+      width: 1200, height: 800, show: false, frame: false,
+      icon: path.join(__dirname, '..', 'public', 'square_logo.png'),
       webPreferences: {
         nodeIntegration: false,
         contextIsolation: true,
