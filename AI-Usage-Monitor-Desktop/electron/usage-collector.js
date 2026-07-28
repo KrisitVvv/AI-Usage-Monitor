@@ -238,19 +238,24 @@ function recordTokenUsage(record) {
   const addTokens = record.totalTokens || 0
 
   // 累加到四个时间维度
+  const vendorId = record.vendorId || '_unknown'
   for (const [scope, key] of [['daily', dateKey], ['weekly', weekKey], ['monthly', monthKey], ['yearly', yearKey]]) {
     try {
       if (!stats[scope][key]) {
-        stats[scope][key] = { totalTokens: 0, models: {}, records: [] }
+        stats[scope][key] = { totalTokens: 0, models: {}, vendorModels: {}, records: [] }
       } else {
         // 确保反序列化后的对象有必需字段
         if (typeof stats[scope][key].totalTokens !== 'number') stats[scope][key].totalTokens = 0
         if (!stats[scope][key].models || typeof stats[scope][key].models !== 'object') stats[scope][key].models = {}
+        if (!stats[scope][key].vendorModels || typeof stats[scope][key].vendorModels !== 'object') stats[scope][key].vendorModels = {}
         if (!Array.isArray(stats[scope][key].records)) stats[scope][key].records = []
       }
       const scopeData = stats[scope][key]
       scopeData.totalTokens += addTokens
       scopeData.models[record.model] = (scopeData.models[record.model] || 0) + addTokens
+      // 按 vendor 分组统计
+      if (!scopeData.vendorModels[vendorId]) scopeData.vendorModels[vendorId] = {}
+      scopeData.vendorModels[vendorId][record.model] = (scopeData.vendorModels[vendorId][record.model] || 0) + addTokens
     } catch (e) {
       console.error(`[TokenUsage] scope=${scope} key=${key} 累加失败: ${e.message}`)
     }
@@ -266,7 +271,8 @@ function recordTokenUsage(record) {
         completionTokens: record.completionTokens || 0,
         totalTokens: addTokens,
         requestId: record.requestId || '',
-        timestamp: ts
+        timestamp: ts,
+        vendorId: record.vendorId || ''
       })
       if (dailyData.records.length > MAX_RECORDS_PER_DAY) {
         dailyData.records = dailyData.records.slice(-MAX_RECORDS_PER_DAY)
@@ -305,8 +311,10 @@ function recordTokenUsage(record) {
 
 /**
  * 构建供前端使用的 Token 统计响应
+ * @param {Object} stats - token 统计数据
+ * @param {string} vendorId - 可选，按 vendor 过滤 hourlyDeltas
  */
-function buildTokenStatsResponse(stats) {
+function buildTokenStatsResponse(stats, vendorId) {
   try {
     if (!stats) return null
 
@@ -341,6 +349,19 @@ function buildTokenStatsResponse(stats) {
       return entry.models
     }
 
+    // 按 vendor 分组的模型用量：{ vendorId: { model: tokens } }
+    function scopeVendorModels(scopeData, key) {
+      const entry = scopeData[key]
+      if (!entry || !entry.vendorModels) return {}
+      return entry.vendorModels
+    }
+
+    // 收集所有出现过的 vendorId
+    const allVendorIds = new Set()
+    for (const s of Object.values(dailyRaw)) {
+      if (s && s.vendorModels) for (const vid of Object.keys(s.vendorModels)) allVendorIds.add(vid)
+    }
+
     const todayRecords = dailyRaw[todayKey]?.records
     const safeRecords = Array.isArray(todayRecords) ? todayRecords : []
 
@@ -350,12 +371,20 @@ function buildTokenStatsResponse(stats) {
       monthTotal: (monthlyRaw[monthKey]?.totalTokens) || 0,
       yearTotal: (yearlyRaw[yearKey]?.totalTokens) || 0,
       models: [...allModels],
-      // 按模型分组的 Token 数
+      vendorIds: [...allVendorIds],
+      // 按模型分组的 Token 数（所有 vendor 合并，同模型累加）
       modelUsage: {
         today: scopeModels(dailyRaw, todayKey),
         week: scopeModels(weeklyRaw, weekKey),
         month: scopeModels(monthlyRaw, monthKey),
         year: scopeModels(yearlyRaw, yearKey)
+      },
+      // 按 vendor 分组的模型用量
+      vendorModelUsage: {
+        today: scopeVendorModels(dailyRaw, todayKey),
+        week: scopeVendorModels(weeklyRaw, weekKey),
+        month: scopeVendorModels(monthlyRaw, monthKey),
+        year: scopeVendorModels(yearlyRaw, yearKey)
       },
       // 最近 20 条原始记录
       recentRecords: safeRecords.slice(-20).reverse(),
@@ -363,8 +392,8 @@ function buildTokenStatsResponse(stats) {
       todayModelDetails: Object.entries(scopeModels(dailyRaw, todayKey)).map(([model, totalTokens]) => ({
         model, totalTokens
       })),
-      // 今日每小时 token 趋势（差值）
-      hourlyDeltas: getTodayHourlyDeltas(),
+      // 今日每小时 token 趋势（差值），按 vendor 隔离
+      hourlyDeltas: getTodayHourlyDeltas(vendorId),
       // 最近 31 天每日汇总（用于月/年维度聚合）
       dailySummary: getDailySummary(31)
     }
@@ -376,16 +405,19 @@ function buildTokenStatsResponse(stats) {
 
 /**
  * 读取 Token 统计（不修改数据）
+ * @param {string} vendorId - 可选，按 vendor 过滤
  */
-function getTokenStats() {
+function getTokenStats(vendorId) {
   try {
     const stats = readTokenStats()
-    return buildTokenStatsResponse(stats)
+    return buildTokenStatsResponse(stats, vendorId)
   } catch (e) {
     console.error(`[TokenStats] 读取统计失败: ${e.message}`)
     return {
       todayTotal: 0, weekTotal: 0, monthTotal: 0, yearTotal: 0,
-      models: [], modelUsage: { today: {}, week: {}, month: {}, year: {} },
+      models: [], vendorIds: [],
+      modelUsage: { today: {}, week: {}, month: {}, year: {} },
+      vendorModelUsage: { today: {}, week: {}, month: {}, year: {} },
       recentRecords: [], todayModelDetails: [],
       hourlyDeltas: [], dailySummary: []
     }
@@ -394,26 +426,33 @@ function getTokenStats() {
 
 /**
  * 获取上一次快照中各模型的累计 token 数（用于计算增量）
+ * @param {string} vendorId - 供应商 ID，用于隔离多账号快照
  */
-function getPrevModelTokens() {
+function getPrevModelTokens(vendorId) {
   const stats = readTokenStats()
   const todayKey = getTodayKey()
   const snapshots = stats.hourlySnapshots?.[todayKey] || {}
-  const hours = Object.keys(snapshots).sort()
-  if (hours.length === 0) return {}
-  const last = snapshots[hours[hours.length - 1]]
+  // 合并所有 vendor 的快照（或仅取指定 vendor）
   const result = {}
-  for (const [name, data] of Object.entries(last.models || {})) {
-    result[name] = data.tokens || 0
+  for (const [key, vendorSnap] of Object.entries(snapshots)) {
+    if (!vendorSnap || typeof vendorSnap !== 'object') continue
+    if (vendorId && key !== `vendor_${vendorId}`) continue
+    const hours = Object.keys(vendorSnap).sort()
+    if (hours.length === 0) continue
+    const last = vendorSnap[hours[hours.length - 1]]
+    for (const [name, data] of Object.entries(last.models || {})) {
+      result[name] = (result[name] || 0) + (data.tokens || 0)
+    }
   }
   return result
 }
 
 /**
  * 记录每小时快照：存储当前所有模型的累计 token 数
- * 启动时和每次轮询时调用，用于计算小时差值绘制趋势图
+ * @param {Object} domData - DOM 解析的用量数据
+ * @param {string} vendorId - 供应商 ID，用于隔离多账号快照
  */
-function recordHourlySnapshot(domData) {
+function recordHourlySnapshot(domData, vendorId) {
   if (!domData || !domData.models || !domData.totalTokens) return
 
   const stats = readTokenStats()
@@ -424,6 +463,10 @@ function recordHourlySnapshot(domData) {
   const hourKey = `${String(now.getHours()).padStart(2, '0')}:00`
 
   if (!stats.hourlySnapshots[todayKey]) stats.hourlySnapshots[todayKey] = {}
+
+  // 按 vendor 隔离快照
+  const vendorKey = vendorId ? `vendor_${vendorId}` : 'default'
+  if (!stats.hourlySnapshots[todayKey][vendorKey]) stats.hourlySnapshots[todayKey][vendorKey] = {}
 
   // 记录此刻的累计值
   const snapshot = {
@@ -441,7 +484,7 @@ function recordHourlySnapshot(domData) {
     }
   }
 
-  stats.hourlySnapshots[todayKey][hourKey] = snapshot
+  stats.hourlySnapshots[todayKey][vendorKey][hourKey] = snapshot
 
   // 清理 30 天前的快照
   const cutoff = new Date(now)
@@ -452,18 +495,46 @@ function recordHourlySnapshot(domData) {
   }
 
   throttledWriteTokenStats(stats)
-  console.log(`[TokenStats] 快照已记录: ${todayKey} ${hourKey} total=${snapshot.totalTokens}`)
+  console.log(`[TokenStats] 快照已记录: ${todayKey} ${hourKey} vendor=${vendorKey} total=${snapshot.totalTokens}`)
 }
 
 /**
  * 获取今日每小时的 token 差值（用于趋势图）
- * 返回格式: [{ hour: '09:00', delta: 12345, model: { name, delta } }]
+ * @param {string} vendorId - 供应商 ID，用于隔离多账号数据
+ * 返回格式: [{ hour: '09:00', delta: 12345, models: { model: delta } }]
  */
-function getTodayHourlyDeltas() {
+function getTodayHourlyDeltas(vendorId) {
   const stats = readTokenStats()
   const todayKey = getTodayKey()
   const snapshots = stats.hourlySnapshots?.[todayKey] || {}
-  const hours = Object.keys(snapshots).sort()
+
+  // 合并所有 vendor 的快照数据（按小时聚合）
+  const mergedSnapshots = {}
+  for (const [key, vendorSnap] of Object.entries(snapshots)) {
+    if (!vendorSnap || typeof vendorSnap !== 'object') continue
+    // 如果指定了 vendorId，只取该 vendor 的数据
+    if (vendorId && key !== `vendor_${vendorId}`) continue
+    for (const [hour, snapshot] of Object.entries(vendorSnap)) {
+      if (!mergedSnapshots[hour]) {
+        mergedSnapshots[hour] = { ...snapshot, models: { ...snapshot.models } }
+      } else {
+        // 聚合：totalTokens / totalRequests 累加，models 按模型名合并
+        const prev = mergedSnapshots[hour]
+        prev.totalTokens = (prev.totalTokens || 0) + (snapshot.totalTokens || 0)
+        prev.totalRequests = (prev.totalRequests || 0) + (snapshot.totalRequests || 0)
+        for (const [modelName, modelData] of Object.entries(snapshot.models || {})) {
+          if (!prev.models[modelName]) {
+            prev.models[modelName] = { ...modelData }
+          } else {
+            prev.models[modelName].tokens = (prev.models[modelName].tokens || 0) + (modelData.tokens || 0)
+            prev.models[modelName].requests = (prev.models[modelName].requests || 0) + (modelData.requests || 0)
+          }
+        }
+      }
+    }
+  }
+
+  const hours = Object.keys(mergedSnapshots).sort()
 
   if (hours.length < 1) return []
 
@@ -471,7 +542,7 @@ function getTodayHourlyDeltas() {
   let prev = null
 
   for (const hour of hours) {
-    const curr = snapshots[hour]
+    const curr = mergedSnapshots[hour]
     if (!curr) continue
 
     if (prev) {
@@ -722,4 +793,4 @@ async function collectAll() {
   return cacheData
 }
 
-module.exports = { collectAll, readCache, recordTokenUsage, getTokenStats, resetDeepSeekBudget, flushTokenStats, loadTokenStats, recordHourlySnapshot, getPrevModelTokens, getTodayHourlyDeltas, getDailySummary }
+module.exports = { collectAll, readCache, writeCache, recordTokenUsage, getTokenStats, resetDeepSeekBudget, flushTokenStats, loadTokenStats, recordHourlySnapshot, getPrevModelTokens, getTodayHourlyDeltas, getDailySummary }

@@ -2,8 +2,8 @@
  * DeepSeek 用量页面监听器
  *
  * 通过隐藏窗口加载 DeepSeek 用量页面，利用页面的 Session/Cookie 读取用量数据。
- * 使用 partition: 'persist:deepseek' 自动持久化 session，重启后自动恢复登录态。
- * 每小时轮询一次，计算 token 差值。
+ * 使用 partition: 'persist:deepseek-{vendorId}' 按供应商隔离 session，支持多账号。
+ * 每个 DeepSeek 供应商独立窗口、独立登录态，重启后自动恢复。
  */
 
 const { BrowserWindow, session } = require('electron')
@@ -13,7 +13,9 @@ const DEEPSEEK_USAGE_URL = 'https://platform.deepseek.com/usage'
 const POLL_INTERVAL_MS = 60 * 60 * 1000 // 1 小时
 
 class DeepSeekMonitor {
-  constructor() {
+  constructor(vendorId) {
+    this.vendorId = vendorId || 'default'
+    this.partition = `persist:deepseek-${this.vendorId}`
     this.monitorWindow = null
     this.isRunning = false
     this.status = {
@@ -37,7 +39,7 @@ class DeepSeekMonitor {
     this.status.active = true
     this._navRetryCount = 0
     this._pageReady = false
-    console.log('[DS-Monitor] 启动')
+    console.log(`[DS-Monitor:${this.vendorId}] 启动`)
     this.createMonitorWindow()
   }
 
@@ -49,16 +51,16 @@ class DeepSeekMonitor {
     if (this.monitorWindow) {
       // 关闭前显式保存 session，确保登录态持久化到磁盘
       try {
-        const s = session.fromPartition('persist:deepseek')
+        const s = session.fromPartition(this.partition)
         await s.saveStorage()
-        console.log('[DS-Monitor] session 已保存')
+        console.log(`[DS-Monitor:${this.vendorId}] session 已保存`)
       } catch (e) {
-        console.warn('[DS-Monitor] session 保存失败:', e.message)
+        console.warn(`[DS-Monitor:${this.vendorId}] session 保存失败:`, e.message)
       }
       this.monitorWindow.destroy()
       this.monitorWindow = null
     }
-    console.log('[DS-Monitor] 已停止')
+    console.log(`[DS-Monitor:${this.vendorId}] 已停止`)
   }
 
   // ====== 窗口创建 ======
@@ -70,7 +72,7 @@ class DeepSeekMonitor {
       webPreferences: {
         nodeIntegration: false,
         contextIsolation: true,
-        partition: 'persist:deepseek'
+        partition: this.partition
       }
     })
 
@@ -84,9 +86,9 @@ class DeepSeekMonitor {
       this.handlePageLoaded()
     })
 
-    console.log('[DS-Monitor] 加载页面:', DEEPSEEK_USAGE_URL)
+    console.log(`[DS-Monitor:${this.vendorId}] 加载页面:`, DEEPSEEK_USAGE_URL)
     this.monitorWindow.loadURL(DEEPSEEK_USAGE_URL).catch(err => {
-      console.error('[DS-Monitor] 加载失败:', err.message)
+      console.error(`[DS-Monitor:${this.vendorId}] 加载失败:`, err.message)
       this.status.error = err.message
     })
   }
@@ -159,7 +161,7 @@ class DeepSeekMonitor {
     if (!this.monitorWindow) return
 
     const url = this.monitorWindow.webContents.getURL()
-    console.log('[DS-Monitor] 页面加载:', url)
+    console.log(`[DS-Monitor:${this.vendorId}] 页面加载:`, url)
 
     const isLogin = url.includes('/sign_in') || url.includes('/login') || url.includes('accounts.deepseek.com')
 
@@ -168,7 +170,7 @@ class DeepSeekMonitor {
       this.status.error = '未登录'
       this._navRetryCount = 0
       this._pageReady = false
-      console.log('[DS-Monitor] 未登录，等待用户手动触发')
+      console.log(`[DS-Monitor:${this.vendorId}] 未登录，等待用户手动触发`)
       return
     }
 
@@ -178,7 +180,7 @@ class DeepSeekMonitor {
     if (!url.includes('/usage')) {
       if (this._navRetryCount >= 5) { this._navRetryCount = 0; return }
       this._navRetryCount++
-      console.log(`[DS-Monitor] 导航到用量页 (${this._navRetryCount})...`)
+      console.log(`[DS-Monitor:${this.vendorId}] 导航到用量页 (${this._navRetryCount})...`)
       this.monitorWindow.webContents.loadURL(DEEPSEEK_USAGE_URL).catch(() => {})
       return
     }
@@ -209,7 +211,7 @@ class DeepSeekMonitor {
         this.monitorWindow.webContents.loadURL(DEEPSEEK_USAGE_URL).catch(() => {})
         return
       }
-      console.log('[DS-Monitor] 整点轮询 — 刷新用量页')
+      console.log(`[DS-Monitor:${this.vendorId}] 整点轮询 — 刷新用量页`)
       this.monitorWindow.webContents.loadURL(DEEPSEEK_USAGE_URL).catch(() => {})
     }
     // 先等到下一个整点，之后每小时整点执行
@@ -217,7 +219,7 @@ class DeepSeekMonitor {
       poll()
       this._pollTimer = setInterval(poll, POLL_INTERVAL_MS)
     }, msToNextHour)
-    console.log(`[DS-Monitor] 已启动整点轮询（${Math.round(msToNextHour / 1000)}s 后首次执行）`)
+    console.log(`[DS-Monitor:${this.vendorId}] 已启动整点轮询（${Math.round(msToNextHour / 1000)}s 后首次执行）`)
   }
 
   // ====== 数据读取 ======
@@ -239,12 +241,12 @@ class DeepSeekMonitor {
 
       if (captured.length === 0) return
 
-      console.log(`[DS-Monitor] 拦截到 ${captured.length} 条 API 数据`)
+      console.log(`[DS-Monitor:${this.vendorId}] 拦截到 ${captured.length} 条 API 数据`)
       for (const item of captured) {
         this.processApiData(item.url, item.data)
       }
     } catch (e) {
-      console.warn('[DS-Monitor] 读取拦截数据失败:', e.message)
+      console.warn(`[DS-Monitor:${this.vendorId}] 读取拦截数据失败:`, e.message)
     }
   }
 
@@ -302,7 +304,7 @@ class DeepSeekMonitor {
 
       if (result) {
         const dom = JSON.parse(result)
-        console.log('[DS-Monitor] DOM 解析:', JSON.stringify(dom).substring(0, 300))
+        console.log(`[DS-Monitor:${this.vendorId}] DOM 解析:`, JSON.stringify(dom).substring(0, 300))
         this.handleData({
           type: 'dom-usage',
           url: 'dom',
@@ -311,7 +313,7 @@ class DeepSeekMonitor {
         })
       }
     } catch (e) {
-      console.warn('[DS-Monitor] DOM 读取失败:', e.message)
+      console.warn(`[DS-Monitor:${this.vendorId}] DOM 读取失败:`, e.message)
     }
   }
 
@@ -340,7 +342,9 @@ class DeepSeekMonitor {
     this.status.lastDataAt = new Date().toISOString()
     this.status.requestCount++
     this.status.error = null
-    console.log(`[DS-Monitor] >>> 数据捕获: type=${payload.type}`)
+    console.log(`[DS-Monitor:${this.vendorId}] >>> 数据捕获: type=${payload.type}`)
+    // 注入 vendorId，使下游能区分数据来源
+    payload.vendorId = this.vendorId
     if (this.onDataCallback) this.onDataCallback(payload)
   }
 
@@ -360,7 +364,7 @@ class DeepSeekMonitor {
     if (!this.monitorWindow || !this._pageReady) return false
     const url = this.monitorWindow.webContents.getURL()
     if (!url.includes('/usage')) return false
-    console.log('[DS-Monitor] 手动刷新 — 重新加载用量页')
+    console.log(`[DS-Monitor:${this.vendorId}] 手动刷新 — 重新加载用量页`)
     this.monitorWindow.webContents.loadURL(DEEPSEEK_USAGE_URL).catch(() => {})
     return true
   }
@@ -370,7 +374,7 @@ class DeepSeekMonitor {
     if (!this.monitorWindow) return false
     this.monitorWindow.show()
     this.monitorWindow.webContents.loadURL(DEEPSEEK_USAGE_URL).catch(() => {})
-    console.log('[DS-Monitor] 用户触发登录窗口')
+    console.log(`[DS-Monitor:${this.vendorId}] 用户触发登录窗口`)
     return true
   }
 

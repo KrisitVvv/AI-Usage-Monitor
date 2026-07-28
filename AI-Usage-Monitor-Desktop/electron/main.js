@@ -8,7 +8,7 @@ app.name = 'AI Usage Monitor'
 
 let mainWindow = null
 let collectTimer = null
-let dsMonitor = null
+const dsMonitors = new Map() // vendorId → DeepSeekMonitor
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -171,7 +171,7 @@ app.whenReady().then(() => {
 
     // 如果是 DeepSeek 供应商，确保监听器已启动
     if ((newVendor.provider || '').toLowerCase().includes('deepseek')) {
-      ensureMonitor()
+      ensureMonitors()
     }
 
     return { success: true, vendor: newVendor }
@@ -198,15 +198,53 @@ app.whenReady().then(() => {
     return { success: true }
   })
 
-  ipcMain.handle('delete-vendor', (_event, vendorId) => {
+  ipcMain.handle('delete-vendor', async (_event, vendorId) => {
     if (!vendorId) throw new Error('供应商 ID 不能为空')
     const vendors = readVendors()
     const idx = vendors.findIndex(v => v.id === vendorId)
     if (idx === -1) throw new Error('供应商不存在')
+    const deletedVendor = vendors[idx]
     vendors.splice(idx, 1)
     writeVendors(vendors)
 
-    // 删除后触发一次采集，刷新缓存
+    // 如果是 DeepSeek 供应商，清理对应的监控实例和浏览器 session
+    if ((deletedVendor.provider || '').toLowerCase().includes('deepseek')) {
+      const monitor = dsMonitors.get(vendorId)
+      if (monitor) {
+        monitor.stop()
+        dsMonitors.delete(vendorId)
+        console.log(`[Main] 已停止并移除供应商 ${vendorId} 的监控实例`)
+      }
+      // 清除对应的浏览器 session（cookie/localStorage 等）
+      try {
+        const { session } = require('electron')
+        const ses = session.fromPartition(`persist:deepseek-${vendorId}`)
+        await ses.clearStorageData({
+          storages: ['cookies', 'localstorage', 'caches', 'serviceworkers']
+        })
+        console.log(`[Main] 已清除供应商 ${vendorId} 的浏览器 session 数据`)
+      } catch (e) {
+        console.warn(`[Main] 清除 session 失败:`, e.message)
+      }
+    }
+
+    // 立即更新缓存并推送前端，不等待异步采集
+    try {
+      const { readCache, writeCache } = require('./usage-collector')
+      const cache = readCache()
+      if (cache) {
+        cache.vendors = vendors
+        // 所有供应商已删除时，清除缓存的余额数据，防止前端显示幽灵条目
+        if (vendors.length === 0) {
+          delete cache.deepseekBalance
+          delete cache.deepseekBalances
+        }
+        writeCache(cache)
+        mainWindow?.webContents.send('usage-data-updated', cache)
+      }
+    } catch { /* 忽略 */ }
+
+    // 同时触发一次采集，刷新余额等数据
     triggerCollect()
 
     return { success: true }
@@ -253,11 +291,36 @@ app.whenReady().then(() => {
     return vendors.some(v => (v.provider || '').toLowerCase().includes('deepseek'))
   }
 
-  function ensureMonitor() {
-    if (dsMonitor && dsMonitor.isRunning) return
-    if (!hasDeepSeekVendor()) return
-    dsMonitor = new DeepSeekMonitor()
-    dsMonitor.start(dsMonitorCallback)
+  // 为每个 DeepSeek vendor 创建独立的监控实例（隔离 session）
+  function ensureMonitors() {
+    const vendors = readVendors()
+    const deepseekVendors = vendors.filter(v => (v.provider || '').toLowerCase().includes('deepseek'))
+
+    // 启动缺失的监控
+    for (const v of deepseekVendors) {
+      if (!dsMonitors.has(v.id)) {
+        const monitor = new DeepSeekMonitor(v.id)
+        monitor.start(dsMonitorCallback)
+        dsMonitors.set(v.id, monitor)
+        console.log(`[Main] 为供应商 ${v.customName || v.id} 创建监控实例`)
+      }
+    }
+
+    // 停止已删除供应商的监控
+    for (const [vendorId, monitor] of dsMonitors) {
+      if (!deepseekVendors.find(v => v.id === vendorId)) {
+        monitor.stop()
+        dsMonitors.delete(vendorId)
+        console.log(`[Main] 移除供应商 ${vendorId} 的监控实例`)
+      }
+    }
+  }
+
+  // 获取指定 vendorId 的监控实例，或获取任意一个
+  function getMonitor(vendorId) {
+    if (vendorId && dsMonitors.has(vendorId)) return dsMonitors.get(vendorId)
+    // fallback: 返回第一个
+    return dsMonitors.values().next().value || null
   }
 
   // 监听器数据回调：收到 DeepSeek 用量页面的数据后转发给 token 统计
@@ -275,7 +338,8 @@ app.whenReady().then(() => {
         completionTokens: data.usage.completion_tokens || 0,
         totalTokens: data.usage.total_tokens || 0,
         completionDetails: data.usage.completion_tokens_details || null,
-        timestamp: payload.timestamp
+        timestamp: payload.timestamp,
+        vendorId: payload.vendorId
       }
       const stats = recordTokenUsage(record)
       if (stats) {
@@ -297,7 +361,8 @@ app.whenReady().then(() => {
               promptTokens: item.prompt_tokens || item.usage?.prompt_tokens || 0,
               completionTokens: item.completion_tokens || item.usage?.completion_tokens || 0,
               totalTokens,
-              timestamp: item.created_at ? item.created_at * 1000 : payload.timestamp
+              timestamp: item.created_at ? item.created_at * 1000 : payload.timestamp,
+              vendorId: payload.vendorId
             }
             recordTokenUsage(record)
             hasNewData = true
@@ -313,10 +378,10 @@ app.whenReady().then(() => {
     // 3. DOM 解析的用量数据（从页面文本中提取）— 必须在余额检查之前
     if (payload.type === 'dom-usage' && data) {
       console.log(`[Main] DOM 用量: 余额=${data.balance} 消费=${data.totalCost} tokens=${data.totalTokens}`)
-      // 获取上次快照中各模型的累计 token 数，用于计算增量
-      const prevTokens = getPrevModelTokens()
-      // 记录每小时快照（用于趋势图）
-      recordHourlySnapshot(data)
+      // 获取上次快照中各模型的累计 token 数，用于计算增量（按 vendor 隔离）
+      const prevTokens = getPrevModelTokens(payload.vendorId)
+      // 记录每小时快照（用于趋势图，按 vendor 隔离）
+      recordHourlySnapshot(data, payload.vendorId)
       if (data.models && data.models.length > 0) {
         let hasNewData = false
         for (const model of data.models) {
@@ -334,7 +399,8 @@ app.whenReady().then(() => {
               promptTokens: 0,
               completionTokens: 0,
               totalTokens: delta,
-              timestamp: payload.timestamp
+              timestamp: payload.timestamp,
+              vendorId: payload.vendorId
             }
             recordTokenUsage(record)
             hasNewData = true
@@ -357,29 +423,34 @@ app.whenReady().then(() => {
     console.log('[Main] 未处理的数据格式:', payload.type, Object.keys(data || {}).join(', '))
   }
 
-  ensureMonitor()
+  ensureMonitors()
 
-  // 暴露监听器状态查询
-  ipcMain.handle('get-monitor-status', () => {
-    return dsMonitor ? dsMonitor.getStatus() : { active: false }
+  // 暴露监听器状态查询（支持 vendorId 参数路由到对应监控实例）
+  ipcMain.handle('get-monitor-status', (_event, vendorId) => {
+    const monitor = getMonitor(vendorId)
+    return monitor ? monitor.getStatus() : { active: false }
   })
 
-  ipcMain.handle('get-monitor-login-status', () => {
-    return dsMonitor ? dsMonitor.isLoggedIn() : false
+  ipcMain.handle('get-monitor-login-status', (_event, vendorId) => {
+    const monitor = getMonitor(vendorId)
+    return monitor ? monitor.isLoggedIn() : false
   })
 
-  ipcMain.handle('show-login-window', () => {
-    if (dsMonitor) dsMonitor.showLoginWindow()
+  ipcMain.handle('show-login-window', (_event, vendorId) => {
+    const monitor = getMonitor(vendorId)
+    if (monitor) monitor.showLoginWindow()
     return { success: true }
   })
 
-  ipcMain.handle('refresh-monitor', () => {
-    if (dsMonitor) dsMonitor.refresh()
+  ipcMain.handle('refresh-monitor', (_event, vendorId) => {
+    const monitor = getMonitor(vendorId)
+    if (monitor) monitor.refresh()
     return { success: true }
   })
 
-  ipcMain.handle('refresh-monitor-now', () => {
-    const ok = dsMonitor ? dsMonitor.refreshNow() : false
+  ipcMain.handle('refresh-monitor-now', (_event, vendorId) => {
+    const monitor = getMonitor(vendorId)
+    const ok = monitor ? monitor.refreshNow() : false
     return { success: ok }
   })
 
@@ -481,6 +552,38 @@ app.whenReady().then(() => {
     }
   })
 
+  // ---------- 获取更新日志（从 GitHub Releases API） ----------
+  ipcMain.handle('get-changelog', async () => {
+    try {
+      const response = await fetch('https://api.github.com/repos/KrisitVvv/AI-Usage-Monitor/releases?per_page=20')
+      if (!response.ok) {
+        return { success: false, error: `GitHub API 返回 ${response.status}` }
+      }
+      const releases = await response.json()
+      const list = releases.map(r => ({
+        version: (r.tag_name || '').replace(/^v/i, ''),
+        date: (r.published_at || r.created_at || '').split('T')[0],
+        changes: parseReleaseNotes(r.body || ''),
+        downloadUrl: r.html_url
+      }))
+      return { success: true, list }
+    } catch (e) {
+      console.error('[Main] 获取更新日志失败:', e.message)
+      return { success: false, error: e.message }
+    }
+  })
+
+  /**
+   * 将 GitHub Release body 解析为变更列表
+   * 按行解析，过滤常见的无用行
+   */
+  function parseReleaseNotes(body) {
+    const lines = body.split('\n')
+      .map(l => l.replace(/^[\s*#\-•·]+/, '').trim())
+      .filter(l => l.length > 0 && !/^full changelog/i.test(l) && !/^https?:\/\//.test(l))
+    return lines.length > 0 ? lines : ['请查看 GitHub Release 页面获取详情']
+  }
+
   // ---------- 获取缓存大小 ----------
   ipcMain.handle('get-cache-size', async () => {
     try {
@@ -508,24 +611,36 @@ app.whenReady().then(() => {
   // ---------- 清理缓存 ----------
   ipcMain.handle('clear-cache', async () => {
     try {
-      const cachePath = path.join(app.getPath('userData'), 'Cache')
-      function removeDir(dir) {
-        if (!fs.existsSync(dir)) return
-        const entries = fs.readdirSync(dir, { withFileTypes: true })
-        for (const entry of entries) {
-          const fullPath = path.join(dir, entry.name)
-          if (entry.isDirectory()) {
-            removeDir(fullPath)
-          } else {
-            fs.unlinkSync(fullPath)
-          }
-        }
-        fs.rmdirSync(dir)
-      }
-      removeDir(cachePath)
+      // 清理浏览器磁盘缓存（Chromium 管理）
+      const ses = session.defaultSession
+      await ses.clearCache()
+      // 清理 localStorage / cookies / service workers 等存储
+      await ses.clearStorageData({
+        storages: ['caches', 'serviceworkers', 'localstorage']
+      })
       return { success: true }
     } catch (e) {
-      return { success: false, error: e.message }
+      console.warn('[Main] 清理缓存失败:', e.message)
+      // 回退：尝试删除 Cache 目录中的文件（忽略锁定文件）
+      try {
+        const cachePath = path.join(app.getPath('userData'), 'Cache')
+        if (fs.existsSync(cachePath)) {
+          const entries = fs.readdirSync(cachePath, { withFileTypes: true })
+          for (const entry of entries) {
+            const fullPath = path.join(cachePath, entry.name)
+            try {
+              if (entry.isDirectory()) {
+                fs.rmSync(fullPath, { recursive: true, force: true })
+              } else {
+                fs.unlinkSync(fullPath)
+              }
+            } catch { /* 忽略锁定文件 */ }
+          }
+        }
+        return { success: true }
+      } catch {
+        return { success: false, error: e.message }
+      }
     }
   })
 
@@ -551,7 +666,8 @@ app.whenReady().then(() => {
 
 app.on('window-all-closed', () => {
   if (collectTimer) clearInterval(collectTimer)
-  if (dsMonitor) dsMonitor.stop()
+  for (const [, monitor] of dsMonitors) monitor.stop()
+  dsMonitors.clear()
   if (process.platform !== 'darwin') app.quit()
 })
 
@@ -562,8 +678,8 @@ app.on('before-quit', (event) => {
   isQuitting = true
   event.preventDefault()
   if (collectTimer) clearInterval(collectTimer)
-  const stopPromise = dsMonitor ? dsMonitor.stop() : Promise.resolve()
-  stopPromise.then(() => {
+  const stopPromises = [...dsMonitors.values()].map(m => m.stop())
+  Promise.all(stopPromises).then(() => {
     flushTokenStats()
     app.quit()
   }).catch(() => {

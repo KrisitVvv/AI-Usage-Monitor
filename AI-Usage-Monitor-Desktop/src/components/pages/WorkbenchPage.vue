@@ -6,11 +6,16 @@ import * as echarts from 'echarts'
 const timeRange = ref('today')
 const loading = ref(true)
 
+// 1.5 当前选中的 vendorId（用于 Token 统计筛选）
+const selectedVendorId = ref('all')
+
 // 2. Token 统计实时数据（来自 IPC）
 const tokenStats = ref({
   todayTotal: 0, weekTotal: 0, monthTotal: 0, yearTotal: 0,
   models: [],
+  vendorIds: [],
   modelUsage: { today: {}, week: {}, month: {}, year: {} },
+  vendorModelUsage: { today: {}, week: {}, month: {}, year: {} },
   recentRecords: [],
   todayModelDetails: [],
   hourlyDeltas: [],
@@ -23,6 +28,7 @@ const tokenStatsError = ref('')
 const manualRefreshing = ref(false)
 
 let unsubscribeToken = null
+let unsubscribeUsage = null
 
 async function manualRefresh() {
   if (!window.electronAPI?.refreshMonitorNow || manualRefreshing.value) return
@@ -96,9 +102,22 @@ function buildChartData() {
   const range = timeRange.value
   const hourlyDeltas = tokenStats.value.hourlyDeltas || []
   const dailySummary = tokenStats.value.dailySummary || []
-  const usage = tokenStats.value.modelUsage || {}
-  const allModels = tokenStats.value.models || []
-  const currentUsage = usage[range] || {}
+  const vid = selectedVendorId.value
+
+  // 根据是否选中特定 vendor 决定数据源
+  let allModels
+  let currentUsage = {}
+  let vendorModels = null // 当选中特定 vendor 时，记录该 vendor 的模型集合
+  if (vid === 'all') {
+    const usage = tokenStats.value.modelUsage || {}
+    allModels = tokenStats.value.models || []
+    currentUsage = usage[range] || {}
+  } else {
+    // 按 vendor 筛选：从 vendorModelUsage 中获取该 vendor 的模型列表
+    vendorModels = tokenStats.value.vendorModelUsage?.[range]?.[vid] || {}
+    allModels = Object.keys(vendorModels)
+    currentUsage = vendorModels
+  }
 
   const models = allModels.length > 0 ? allModels : Object.keys(currentUsage)
   if (models.length === 0) {
@@ -114,7 +133,16 @@ function buildChartData() {
     const dayNames = ['周日', '周一', '周二', '周三', '周四', '周五', '周六']
     const hourMap = {}
     for (const d of hourlyDeltas) {
-      hourMap[d.hour] = d.models || {}
+      // 当选中特定 vendor 时，只保留该 vendor 使用的模型
+      if (vendorModels) {
+        const filtered = {}
+        for (const [m, t] of Object.entries(d.models || {})) {
+          if (m in vendorModels) filtered[m] = t
+        }
+        hourMap[d.hour] = filtered
+      } else {
+        hourMap[d.hour] = d.models || {}
+      }
     }
     const allHours = []
     for (let h = 0; h < 24; h++) {
@@ -129,10 +157,11 @@ function buildChartData() {
     // 天粒度（最近 7 天）
     const recent7 = dailySummary.slice(-7)
     xData = recent7.map(d => d.dayLabel)
-    buckets = recent7.map(d => ({
-      label: d.dayLabel,
-      models: d.models || {}
-    }))
+    buckets = recent7.map(d => {
+      // 当选中特定 vendor 时，只保留该 vendor 使用的模型
+      const m = vendorModels ? Object.fromEntries(Object.entries(d.models || {}).filter(([k]) => k in vendorModels)) : (d.models || {})
+      return { label: d.dayLabel, models: m }
+    })
   } else if (range === 'month') {
     // 周粒度：将最近 31 天按自然周聚合
     const weeks = {}
@@ -144,6 +173,8 @@ function buildChartData() {
       const weekKey = `${monday.getMonth() + 1}/${monday.getDate()}`
       if (!weeks[weekKey]) weeks[weekKey] = { label: weekKey, models: {} }
       for (const [m, t] of Object.entries(day.models || {})) {
+        // 当选中特定 vendor 时，只累加该 vendor 使用的模型
+        if (vendorModels && !(m in vendorModels)) continue
         weeks[weekKey].models[m] = (weeks[weekKey].models[m] || 0) + t
       }
     }
@@ -158,6 +189,8 @@ function buildChartData() {
       const monthLabel = `${d.getMonth() + 1}月`
       if (!months[monthKey]) months[monthKey] = { label: monthLabel, models: {} }
       for (const [m, t] of Object.entries(day.models || {})) {
+        // 当选中特定 vendor 时，只累加该 vendor 使用的模型
+        if (vendorModels && !(m in vendorModels)) continue
         months[monthKey].models[m] = (months[monthKey].models[m] || 0) + t
       }
     }
@@ -185,13 +218,26 @@ const timeRangeLabel = computed(() => {
 
 // Token 消耗总量
 const totalTokensFormatted = computed(() => {
-  const totals = { today: tokenStats.value.todayTotal, week: tokenStats.value.weekTotal, month: tokenStats.value.monthTotal, year: tokenStats.value.yearTotal }
-  return formatTokens(totals[timeRange.value] || 0)
+  const range = timeRange.value
+  if (selectedVendorId.value === 'all') {
+    const totals = { today: tokenStats.value.todayTotal, week: tokenStats.value.weekTotal, month: tokenStats.value.monthTotal, year: tokenStats.value.yearTotal }
+    return formatTokens(totals[range] || 0)
+  }
+  // 按 vendor 筛选：从 vendorModelUsage 中汇总该 vendor 的模型用量
+  const vUsage = tokenStats.value.vendorModelUsage?.[range]?.[selectedVendorId.value] || {}
+  const total = Object.values(vUsage).reduce((s, v) => s + v, 0)
+  return formatTokens(total)
 })
 
 // TOP3 模型
 const top3Tokens = computed(() => {
-  const usage = tokenStats.value.modelUsage?.[timeRange.value] || {}
+  const range = timeRange.value
+  let usage
+  if (selectedVendorId.value === 'all') {
+    usage = tokenStats.value.modelUsage?.[range] || {}
+  } else {
+    usage = tokenStats.value.vendorModelUsage?.[range]?.[selectedVendorId.value] || {}
+  }
   return Object.entries(usage)
     .sort((a, b) => b[1] - a[1])
     .slice(0, 3)
@@ -201,6 +247,18 @@ const top3Tokens = computed(() => {
       usedTokens: tokens,
       usedTokensFormatted: formatTokens(tokens)
     }))
+})
+
+// 当前选中 vendor 的名称（用于显示）
+const selectedVendorName = computed(() => {
+  if (selectedVendorId.value === 'all') return '全部账号'
+  const v = vendors.value.find(v => v.id === selectedVendorId.value)
+  return v?.customName || v?.provider || selectedVendorId.value
+})
+
+// DeepSeek 供应商列表（用于筛选下拉框）
+const deepseekVendors = computed(() => {
+  return (vendors.value || []).filter(v => (v.provider || '').toLowerCase().includes('deepseek'))
 })
 
 // 进度条标签
@@ -249,8 +307,8 @@ const modelUsageAndQuotas = computed(() => {
     })
   }
 
-  // 如果没有供应商但有余额数据，显示默认 DeepSeek 条目
-  if (list.length === 0 && bal) {
+  // 仅当有 DeepSeek 供应商存在于 vendorList 中时，才使用余额显示 DeepSeek 条目
+  if (list.length === 0 && bal && vendorList.some(v => (v.provider || '').toLowerCase().includes('deepseek'))) {
     list.push({
       id: 'deepseek-default',
       provider: 'DeepSeek API',
@@ -338,6 +396,7 @@ const updateTokenChart = () => {
 
 watch(timeRange, () => updateTokenChart())
 watch(tokenStats, () => updateTokenChart(), { deep: true })
+watch(selectedVendorId, () => updateTokenChart())
 
 const handleResize = () => {
   if (tokenChartInstance && !tokenChartInstance.isDisposed()) tokenChartInstance.resize()
@@ -371,7 +430,7 @@ onMounted(async () => {
     try {
       const stats = await window.electronAPI.getTokenStats()
       if (stats) {
-        tokenStats.value = { ...tokenStats.value, ...stats }
+        tokenStats.value = stats
         tokenStatsError.value = ''
       } else {
         tokenStatsError.value = 'Token 统计数据为空'
@@ -396,14 +455,14 @@ onMounted(async () => {
 
     unsubscribeToken = window.electronAPI.onTokenStatsUpdated((data) => {
       if (data) {
-        tokenStats.value = { ...tokenStats.value, ...data }
+        tokenStats.value = data
         tokenStatsError.value = ''
       }
     })
 
-    window.electronAPI.onUsageDataUpdated((data) => {
+    unsubscribeUsage = window.electronAPI.onUsageDataUpdated((data) => {
       if (data.vendors) vendors.value = data.vendors
-      if (data.deepseekBalance) balance.value = data.deepseekBalance
+      balance.value = data.deepseekBalance || null
     })
   } else {
     tokenStatsError.value = '运行环境不支持（非 Electron）'
@@ -419,6 +478,7 @@ onUnmounted(() => {
   window.removeEventListener('resize', handleResize)
   window.removeEventListener('sidebar-toggle-resize', handleResize)
   if (typeof unsubscribeToken === 'function') unsubscribeToken()
+  if (typeof unsubscribeUsage === 'function') unsubscribeUsage()
   if (tokenChartInstance) { tokenChartInstance.dispose(); tokenChartInstance = null }
 })
 </script>
@@ -445,6 +505,10 @@ onUnmounted(() => {
             <div class="total-card-header">
               <span class="total-label">Token 消耗总量</span>
               <div class="time-range-actions">
+                <select class="time-range-select" v-model="selectedVendorId" v-if="deepseekVendors.length > 1">
+                  <option value="all">全部账号</option>
+                  <option v-for="v in deepseekVendors" :key="v.id" :value="v.id">{{ v.customName || v.provider }}</option>
+                </select>
                 <select class="time-range-select" v-model="timeRange">
                   <option value="today">今天</option>
                   <option value="week">本周</option>

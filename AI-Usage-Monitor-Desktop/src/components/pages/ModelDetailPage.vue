@@ -13,6 +13,8 @@ const deleting = ref(false)
 const resetting = ref(false)
 const loginLoading = ref(false)
 const renaming = ref(false)
+const monitorLoggedIn = ref(false)
+let loginPollTimer = null
 const renameValue = ref('')
 let unsubscribe = null
 
@@ -37,6 +39,14 @@ onMounted(async () => {
       }
     } catch { /* 忽略 */ }
 
+    // 查询 DeepSeek Monitor 实际登录状态
+    if (isDeepSeek.value && window.electronAPI.getMonitorLoginStatus) {
+      try {
+        const loggedIn = await window.electronAPI.getMonitorLoginStatus(vendor.value?.id)
+        monitorLoggedIn.value = !!loggedIn
+      } catch { /* 忽略 */ }
+    }
+
     // 订阅后续更新
     unsubscribe = window.electronAPI.onUsageDataUpdated((data) => {
       const found = data.vendors?.find(v => v.id === route.params.id)
@@ -56,6 +66,7 @@ onMounted(async () => {
 })
 
 onUnmounted(() => {
+  stopLoginPoll()
   if (typeof unsubscribe === 'function') unsubscribe()
 })
 
@@ -65,10 +76,21 @@ const isDeepSeek = computed(() => vendor.value?.provider === 'DeepSeek API')
 const isPlan = computed(() => vendor.value?.billingModel === 'plan')
 const isToken = computed(() => vendor.value?.billingModel === 'token')
 const hasBalance = computed(() => isDeepSeek.value && balance.value)
-const isLive = computed(() => hasBalance.value && !balance.value?._stale)
+const isLive = computed(() => isDeepSeek.value ? monitorLoggedIn.value : (hasBalance.value && !balance.value?._stale))
+const isLoggedIn = computed(() => isDeepSeek.value ? monitorLoggedIn.value : hasBalance.value)
 const displayName = computed(() => vendor.value?.customName || shortName(vendor.value?.provider || ''))
 
 const modelColor = computed(() => vendorColor(vendor.value?.provider || ''))
+
+// 供应商类型映射
+const vendorType = computed(() => {
+  const p = vendor.value?.provider || ''
+  if (p.includes('DeepSeek')) return 'DeepSeek'
+  if (p.includes('Kimi') || p.includes('Moonshot')) return 'Moonshot'
+  if (p.includes('OpenAI')) return 'OpenAI'
+  if (p.includes('Aliyun') || p.includes('阿里云')) return 'Aliyun'
+  return ''
+})
 
 function startRename() {
   renameValue.value = vendor.value?.customName || shortName(vendor.value?.provider || '')
@@ -148,11 +170,40 @@ async function loginDeepSeek() {
   if (!window.electronAPI?.showLoginWindow || loginLoading.value) return
   loginLoading.value = true
   try {
-    await window.electronAPI.showLoginWindow()
+    await window.electronAPI.showLoginWindow(vendor.value?.id)
   } catch (e) {
     console.warn('[ModelDetail] 打开登录窗口失败:', e.message)
   } finally {
     setTimeout(() => { loginLoading.value = false }, 2000)
+  }
+  // 登录窗口关闭后，轮询登录状态直到成功
+  startLoginPoll()
+}
+
+function startLoginPoll() {
+  stopLoginPoll()
+  let attempts = 0
+  loginPollTimer = setInterval(async () => {
+    attempts++
+    if (attempts > 30 || monitorLoggedIn.value) { // 最多轮询 30 次（约 30 秒）
+      stopLoginPoll()
+      return
+    }
+    if (!isDeepSeek.value || !window.electronAPI?.getMonitorLoginStatus) return
+    try {
+      const loggedIn = await window.electronAPI.getMonitorLoginStatus(vendor.value?.id)
+      if (loggedIn) {
+        monitorLoggedIn.value = true
+        stopLoginPoll()
+      }
+    } catch { /* 忽略 */ }
+  }, 1000)
+}
+
+function stopLoginPoll() {
+  if (loginPollTimer) {
+    clearInterval(loginPollTimer)
+    loginPollTimer = null
   }
 }
 
@@ -211,7 +262,7 @@ async function resetBudget() {
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/><polyline points="10 17 15 12 10 7"/><line x1="15" y1="12" x2="3" y2="12"/>
             </svg>
-            {{ loginLoading ? '打开中...' : (isLive ? '更换账户' : '登录 DeepSeek') }}
+            {{ loginLoading ? '打开中...' : (isLoggedIn ? '更换账户' : '登录 DeepSeek') }}
           </button>
           <button class="delete-btn danger-btn" @click="showDeleteConfirm = true">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -224,8 +275,20 @@ async function resetBudget() {
 
       <!-- 厂商头部 -->
       <div class="vendor-header">
-        <div class="vendor-avatar" :style="{ backgroundColor: modelColor }">
-          <span class="avatar-letter">{{ displayName.charAt(0) }}</span>
+        <div class="vendor-avatar" :style="vendorType === 'DeepSeek' ? {} : { backgroundColor: modelColor }">
+          <template v-if="vendorType === 'DeepSeek'">
+            <img src="/deepseek.png" alt="DeepSeek" style="width: 52px; height: 52px; object-fit: contain;" />
+          </template>
+          <template v-else-if="vendorType === 'Moonshot'">
+            <svg width="28" height="28" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="10" stroke="white" stroke-width="1.5" fill="none"/><path d="M12 6v6l4 2" stroke="white" stroke-width="1.5" stroke-linecap="round"/></svg>
+          </template>
+          <template v-else-if="vendorType === 'OpenAI'">
+            <svg width="28" height="28" viewBox="0 0 24 24" fill="none"><path d="M12 2a4 4 0 014 4v4a4 4 0 01-4 4 4 4 0 01-4-4V6a4 4 0 014-4z" fill="white" opacity="0.6"/><path d="M12 10a4 4 0 014 4v4a4 4 0 01-4 4 4 4 0 01-4-4v-4a4 4 0 014-4z" fill="white"/></svg>
+          </template>
+          <template v-else-if="vendorType === 'Aliyun'">
+            <svg width="28" height="28" viewBox="0 0 24 24" fill="none"><path d="M18 10h-3a2 2 0 01-2-2V5a2 2 0 012-2h3a2 2 0 012 2v3a2 2 0 01-2 2z" fill="white" opacity="0.6"/><path d="M9 14H6a2 2 0 01-2-2V9a2 2 0 012-2h3a2 2 0 012 2v3a2 2 0 01-2 2z" fill="white"/><path d="M18 21h-3a2 2 0 01-2-2v-3a2 2 0 012-2h3a2 2 0 012 2v3a2 2 0 01-2 2z" fill="white" opacity="0.4"/></svg>
+          </template>
+          <span v-else class="avatar-letter">{{ displayName.charAt(0) }}</span>
         </div>
         <div class="vendor-header-info">
           <div class="vendor-title-row">

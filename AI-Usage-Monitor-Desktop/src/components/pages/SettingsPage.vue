@@ -11,6 +11,7 @@ const error = ref('')
 const showFeedbackModal = ref(false)
 const feedbackView = ref('menu') // 'menu' | 'faq'
 const openFaqIndex = ref(-1)
+const showChangelog = ref(false)
 
 // 检查更新状态
 const appVersion = ref('')
@@ -21,6 +22,11 @@ const updateError = ref('')
 // 缓存管理状态
 const cacheSize = ref(0)
 const clearingCache = ref(false)
+
+// 更新日志（从 GitHub 获取）
+const changelog = ref([])
+const changelogLoading = ref(false)
+const changelogError = ref('')
 
 function openFeedbackModal() {
   feedbackView.value = 'menu'
@@ -45,7 +51,7 @@ function toggleFaq(index) {
 const faqList = [
   {
     q: '为什么数据和实际有误差？',
-    a: '本软件采用的是API和爬虫技术实现，若存在session失效、多设备使用以及未开本软件使用，均会出现部分数据误差，但不影响正常余量监控。'
+    a: '本软件采用的是API和爬虫技术实现，若存在session失效、多设备使用以及未开本软件使用，均会出现部分数据误差，但不影响正常余量监控。本软件由于技术原因建议服务器不停机运行。'
   },
   {
     q: '为什么数据没有实时更新？',
@@ -207,6 +213,26 @@ async function openGitHub() {
   }
   showFeedbackModal.value = false
 }
+
+// 打开更新日志弹窗并加载数据
+async function openChangelog() {
+  showChangelog.value = true
+  if (changelog.value.length > 0) return // 已有缓存
+  if (!window.electronAPI) return
+  changelogLoading.value = true
+  changelogError.value = ''
+  try {
+    const result = await window.electronAPI.getChangelog()
+    if (result.success) {
+      changelog.value = result.list
+    } else {
+      changelogError.value = result.error || '获取失败'
+    }
+  } catch (e) {
+    changelogError.value = e.message || '获取失败'
+  }
+  changelogLoading.value = false
+}
 </script>
 
 <template>
@@ -270,7 +296,18 @@ async function openGitHub() {
         <div class="setting-item">
           <div class="setting-info">
             <span class="setting-label">当前版本</span>
-            <span class="setting-desc">v{{ appVersion || '未知' }}</span>
+            <span class="setting-desc">
+              v{{ appVersion || '未知' }}
+              <button class="changelog-btn" @click.stop="openChangelog" title="查看更新日志">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+                  <polyline points="14 2 14 8 20 8"/>
+                  <line x1="16" y1="13" x2="8" y2="13"/>
+                  <line x1="16" y1="17" x2="8" y2="17"/>
+                  <polyline points="10 9 9 9 8 9"/>
+                </svg>
+              </button>
+            </span>
           </div>
           <button class="check-update-btn" :disabled="checkingUpdate" @click="checkForUpdates">
             <svg v-if="!checkingUpdate" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -418,6 +455,47 @@ async function openGitHub() {
             </div>
           </div>
         </template>
+      </div>
+    </div>
+  </Teleport>
+
+  <!-- 更新日志弹窗 -->
+  <Teleport to="body">
+    <div v-if="showChangelog" class="modal-overlay" @click.self="showChangelog = false">
+      <div class="changelog-modal">
+        <div class="changelog-header">
+          <span>更新日志</span>
+          <button class="modal-close-btn" @click="showChangelog = false">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+            </svg>
+          </button>
+        </div>
+        <div class="changelog-list">
+          <div v-if="changelogLoading" class="changelog-loading">
+            <svg class="spinning" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 12a9 9 0 1 1-6.219-8.56"/>
+            </svg>
+            <span>加载中...</span>
+          </div>
+          <div v-else-if="changelogError" class="changelog-error">
+            <span>获取更新日志失败：{{ changelogError }}</span>
+          </div>
+          <div v-else-if="changelog.length === 0" class="changelog-empty">
+            <span>暂无更新日志</span>
+          </div>
+          <template v-else>
+            <div v-for="(entry, idx) in changelog" :key="idx" class="changelog-entry">
+              <div class="changelog-version-row">
+                <span class="changelog-version">v{{ entry.version }}</span>
+                <span class="changelog-date">{{ entry.date }}</span>
+              </div>
+              <ul class="changelog-changes">
+                <li v-for="(change, ci) in entry.changes" :key="ci">{{ change }}</li>
+              </ul>
+            </div>
+          </template>
+        </div>
       </div>
     </div>
   </Teleport>
@@ -814,6 +892,116 @@ async function openGitHub() {
 .update-error {
   padding: 0.5rem 1.25rem;
   font-size: 0.8125rem;
+  color: #b91c1c;
+}
+
+/* 更新日志按钮 */
+.changelog-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border: none;
+  background: transparent;
+  border-radius: 4px;
+  color: #94a3b8;
+  cursor: pointer;
+  vertical-align: middle;
+  margin-left: 4px;
+  padding: 0;
+  transition: all 0.15s;
+}
+.changelog-btn:hover {
+  background: #f1f5f9;
+  color: #467CFE;
+}
+
+/* 更新日志弹窗 */
+.changelog-modal {
+  background: white;
+  border-radius: 14px;
+  padding: 1.5rem;
+  max-width: 480px;
+  width: 100%;
+  max-height: 80vh;
+  box-shadow: 0 20px 60px rgba(0,0,0,0.15);
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+.changelog-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 1rem;
+  font-weight: 600;
+  color: #1e293b;
+}
+.changelog-list {
+  overflow-y: auto;
+  max-height: calc(80vh - 4rem);
+}
+.changelog-entry {
+  padding-bottom: 1rem;
+  margin-bottom: 1rem;
+  border-bottom: 1px solid #f1f5f9;
+}
+.changelog-entry:last-child {
+  border-bottom: none;
+  margin-bottom: 0;
+  padding-bottom: 0;
+}
+.changelog-version-row {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: 0.5rem;
+}
+.changelog-version {
+  font-size: 0.9375rem;
+  font-weight: 700;
+  color: #1e293b;
+}
+.changelog-date {
+  font-size: 0.75rem;
+  color: #94a3b8;
+}
+.changelog-changes {
+  margin: 0;
+  padding-left: 1.25rem;
+  list-style: none;
+}
+.changelog-changes li {
+  position: relative;
+  font-size: 0.8125rem;
+  color: #475569;
+  line-height: 1.7;
+  padding-left: 0.5rem;
+}
+.changelog-changes li::before {
+  content: '';
+  position: absolute;
+  left: -0.75rem;
+  top: 0.55em;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: #cbd5e1;
+}
+
+.changelog-loading,
+.changelog-error,
+.changelog-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  padding: 2rem 0;
+  font-size: 0.8125rem;
+  color: #94a3b8;
+}
+.changelog-error {
   color: #b91c1c;
 }
 

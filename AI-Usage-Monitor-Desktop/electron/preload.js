@@ -41,12 +41,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // ---------- 重置 DeepSeek 累计充值 ----------
   resetDeepSeekBudget: () => ipcRenderer.invoke('reset-deepseek-budget'),
 
-  // ---------- DeepSeek 用量页面监听器 ----------
-  getMonitorStatus: () => ipcRenderer.invoke('get-monitor-status'),
-  getMonitorLoginStatus: () => ipcRenderer.invoke('get-monitor-login-status'),
-  showLoginWindow: () => ipcRenderer.invoke('show-login-window'),
-  refreshMonitor: () => ipcRenderer.invoke('refresh-monitor'),
-  refreshMonitorNow: () => ipcRenderer.invoke('refresh-monitor-now'),
+  // ---------- DeepSeek 用量页面监听器（支持 vendorId 隔离多账号） ----------
+  getMonitorStatus: (vendorId) => ipcRenderer.invoke('get-monitor-status', vendorId),
+  getMonitorLoginStatus: (vendorId) => ipcRenderer.invoke('get-monitor-login-status', vendorId),
+  showLoginWindow: (vendorId) => ipcRenderer.invoke('show-login-window', vendorId),
+  refreshMonitor: (vendorId) => ipcRenderer.invoke('refresh-monitor', vendorId),
+  refreshMonitorNow: (vendorId) => ipcRenderer.invoke('refresh-monitor-now', vendorId),
   onDeepSeekData: (payload) => ipcRenderer.send('deepseek-monitor-data', payload),
 
   // ---------- 开机自启动 ----------
@@ -63,6 +63,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // ---------- 检查更新 ----------
   checkForUpdates: () => ipcRenderer.invoke('check-for-updates'),
   getAppVersion: () => ipcRenderer.invoke('get-app-version'),
+  getChangelog: () => ipcRenderer.invoke('get-changelog'),
 
   // ---------- 缓存管理 ----------
   getCacheSize: () => ipcRenderer.invoke('get-cache-size'),

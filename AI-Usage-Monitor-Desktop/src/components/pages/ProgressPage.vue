@@ -148,12 +148,12 @@ onMounted(async () => {
   if (window.electronAPI) {
     try {
       const cached = await window.electronAPI.getUsageData()
-      if (cached) realtimeUsage.value = { ...realtimeUsage.value, ...cached }
+      if (cached) realtimeUsage.value = cached
     } catch { /* 忽略 */ }
     // 处理来自详情页的重命名通知（在获取数据后、订阅前）
     applyPendingRenames()
     unsubscribe = window.electronAPI.onUsageDataUpdated((data) => {
-      realtimeUsage.value = { ...realtimeUsage.value, ...data }
+      realtimeUsage.value = data
     })
   }
   setTimeout(() => { loading.value = false }, 600)
