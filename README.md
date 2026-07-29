@@ -3,6 +3,13 @@
   <h1>AI用量监控</h1>
 </div>
 
+<div align="center">
+  
+  [![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+  [![Release](https://img.shields.io/github/v/release/KrisitVvv/AI-Usage-Monitor.svg?style=flat-square)](https://github.com/KrisitVvv/AI-Usage-Monitor/releases/latest)
+  
+</div>
+
 ## 功能描述 Functional Description
 AI用量监控适用于Deepseek,Kimi,GLM.Qwen等模型的API调用情况集成监控，方便用户直观了解模型调用情况。  
 The AI usage monitor can get Deepseek,Kimi,GLM.Qwen and so on model's API usage situation,and display it in a clear and intuitive way.  
@@ -32,3 +39,9 @@ Use the following commands to build the project.
 npm run build
 npm run dist
 ```
+## 快速安装 Quick Installation
+在release中下载最新的可执行文件，双击即可安装。
+Download the latest executable file from the release and double-click it to install.
+> [!IMPORTANT]
+> 安装前务必保证可用磁盘空间至少为500MB。
+> Please make sure that the available disk space is at least 500MB before installation.
