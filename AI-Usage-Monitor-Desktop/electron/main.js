@@ -33,9 +33,14 @@ function createWindow() {
     mainWindow?.webContents.send('window-state-changed', false)
   })
 
-  // 开发模式下加载 Vite 服务器（动态端口）
-  const vitePort = process.env.VITE_PORT || 5173
-  mainWindow.loadURL(`http://localhost:${vitePort}`)
+  if (app.isPackaged) {
+    // 打包后加载构建产物
+    mainWindow.loadFile(path.join(__dirname, '..', 'dist', 'index.html'))
+  } else {
+    // 开发模式下加载 Vite 服务器（动态端口）
+    const vitePort = process.env.VITE_PORT || 5173
+    mainWindow.loadURL(`http://localhost:${vitePort}`)
+  }
 
   // 可选：打开 DevTools
    //mainWindow.webContents.openDevTools()
@@ -76,7 +81,7 @@ function createTray() {
     {
       label: '显示窗口',
       click: () => {
-        if (mainWindow) {
+        if (mainWindow && !mainWindow.isDestroyed()) {
           mainWindow.show()
           mainWindow.focus()
         }
@@ -96,7 +101,7 @@ function createTray() {
 
   // 左键点击显示窗口
   tray.on('click', () => {
-    if (mainWindow) {
+    if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.show()
       mainWindow.focus()
     }
