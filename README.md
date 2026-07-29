@@ -30,5 +30,5 @@ npm run electron:dev
 Use the following commands to build the project.
 ```bash
 npm run build
-npm run electron:build
+npm run dist
 ```
