@@ -426,13 +426,39 @@ function getTokenStats(vendorId) {
 
 /**
  * 获取上一次快照中各模型的累计 token 数（用于计算增量）
+ *
+ * 逻辑：
+ * 1. 优先用当天最新快照作为基线（正常跨小时场景）
+ * 2. 如果当天还没有快照（跨午夜场景），回退到昨天最后一个快照
+ *    这样今天第一笔数据只记增量，不会把全量累计值吞进来
+ *
  * @param {string} vendorId - 供应商 ID，用于隔离多账号快照
  */
 function getPrevModelTokens(vendorId) {
   const stats = readTokenStats()
   const todayKey = getTodayKey()
-  const snapshots = stats.hourlySnapshots?.[todayKey] || {}
-  // 合并所有 vendor 的快照（或仅取指定 vendor）
+
+  // 尝试从当天快照中获取基线
+  const todaySnapshots = stats.hourlySnapshots?.[todayKey] || {}
+  let result = mergeSnapshotModels(todaySnapshots, vendorId)
+  if (Object.keys(result).length > 0) return result
+
+  // 当天无快照 → 跨午夜，用昨天最后快照作为基线
+  const yesterday = new Date()
+  yesterday.setDate(yesterday.getDate() - 1)
+  const yesterdayKey = `${yesterday.getFullYear()}-${String(yesterday.getMonth() + 1).padStart(2, '0')}-${String(yesterday.getDate()).padStart(2, '0')}`
+  const yesterdaySnapshots = stats.hourlySnapshots?.[yesterdayKey] || {}
+  result = mergeSnapshotModels(yesterdaySnapshots, vendorId)
+  if (Object.keys(result).length > 0) {
+    console.log(`[TokenStats] 跨午夜基线: 使用 ${yesterdayKey} 最后快照, models=${Object.keys(result).length}`)
+  }
+  return result
+}
+
+/**
+ * 从快照中提取各模型的最后累计值
+ */
+function mergeSnapshotModels(snapshots, vendorId) {
   const result = {}
   for (const [key, vendorSnap] of Object.entries(snapshots)) {
     if (!vendorSnap || typeof vendorSnap !== 'object') continue
