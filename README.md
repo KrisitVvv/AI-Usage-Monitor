@@ -40,8 +40,8 @@ npm run build
 npm run dist
 ```
 ## 快速安装 Quick Installation
-在release中下载最新的可执行文件，双击即可安装。
+在release中下载最新的可执行文件，双击即可安装。  
 Download the latest executable file from the release and double-click it to install.
 > [!IMPORTANT]
-> 安装前务必保证可用磁盘空间至少为500MB。
+> 安装前务必保证可用磁盘空间至少为500MB。  
 > Please make sure that the available disk space is at least 500MB before installation.
