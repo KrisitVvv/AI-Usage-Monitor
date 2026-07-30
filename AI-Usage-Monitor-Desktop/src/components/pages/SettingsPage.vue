@@ -549,12 +549,9 @@ async function openChangelog() {
             </svg>
           </div>
           <div class="update-modal-badge new">发现新版本 v{{ updateResult.latestVersion }}</div>
-          <div v-if="updateResult.changelog && updateResult.changelog.length > 0" class="update-modal-cl-list">
-            <div v-for="(entry, idx) in updateResult.changelog" :key="idx" class="update-modal-cl-entry">
-              <div class="update-modal-cl-version">v{{ entry.version }} <span class="update-modal-cl-date">{{ entry.date }}</span></div>
-              <ul class="update-modal-cl-changes">
-                <li v-for="(change, ci) in entry.changes" :key="ci">{{ change }}</li>
-              </ul>
+          <div v-if="updateResult.changelog && updateResult.changelog.length > 0" class="update-modal-notes">
+            <div v-for="(entry, idx) in updateResult.changelog" :key="idx">
+              <div v-for="(change, ci) in entry.changes" :key="ci" class="update-modal-cl-line">• {{ change }}</div>
             </div>
           </div>
           <p v-else-if="updateResult.releaseNotes" class="update-modal-notes">{{ updateResult.releaseNotes }}</p>
@@ -1085,10 +1082,14 @@ async function openChangelog() {
   margin: 0;
   font-size: 0.8rem;
   color: #64748b;
-  line-height: 1.6;
-  white-space: pre-wrap;
+  line-height: 1.7;
   width: 100%;
   text-align: left;
+}
+.update-modal-cl-line {
+  padding: 0.1rem 0;
+  font-size: 0.8rem;
+  color: #475569;
 }
 .update-modal-desc {
   margin: 0;
@@ -1130,56 +1131,6 @@ async function openChangelog() {
 }
 .update-modal-btn.secondary:hover {
   background: #e2e8f0;
-}
-
-/* 弹窗内版本更新列表 */
-.update-modal-cl-list {
-  width: 100%;
-  max-height: 260px;
-  overflow-y: auto;
-  text-align: left;
-  display: flex;
-  flex-direction: column;
-  gap: 0.75rem;
-}
-.update-modal-cl-entry {
-  border: 1px solid #f1f5f9;
-  border-radius: 8px;
-  padding: 0.6rem 0.85rem;
-}
-.update-modal-cl-version {
-  font-size: 0.85rem;
-  font-weight: 700;
-  color: #1e293b;
-  margin-bottom: 0.35rem;
-}
-.update-modal-cl-date {
-  font-size: 0.72rem;
-  font-weight: 400;
-  color: #94a3b8;
-  margin-left: 0.5rem;
-}
-.update-modal-cl-changes {
-  margin: 0;
-  padding-left: 1rem;
-  list-style: none;
-}
-.update-modal-cl-changes li {
-  position: relative;
-  font-size: 0.78rem;
-  color: #475569;
-  line-height: 1.65;
-  padding-left: 0.5rem;
-}
-.update-modal-cl-changes li::before {
-  content: '';
-  position: absolute;
-  left: -0.65rem;
-  top: 0.55em;
-  width: 4px;
-  height: 4px;
-  border-radius: 50%;
-  background: #cbd5e1;
 }
 
 @container (max-width: 480px) {
