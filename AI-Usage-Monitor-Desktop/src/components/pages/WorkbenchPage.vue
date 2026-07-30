@@ -115,6 +115,17 @@ function buildChartData() {
   } else {
     // 按 vendor 筛选：从 vendorModelUsage 中获取该 vendor 的模型列表
     vendorModels = tokenStats.value.vendorModelUsage?.[range]?.[vid] || {}
+    // 若当前粒度无模型名，从其他粒度回退获取（当日可能仅快照有数据）
+    if (Object.keys(vendorModels).length === 0) {
+      for (const fb of ['today', 'week', 'month', 'year']) {
+        if (fb === range) continue
+        const fbData = tokenStats.value.vendorModelUsage?.[fb]?.[vid]
+        if (fbData && Object.keys(fbData).length > 0) {
+          vendorModels = fbData
+          break
+        }
+      }
+    }
     allModels = Object.keys(vendorModels)
     currentUsage = vendorModels
   }
@@ -219,24 +230,55 @@ const timeRangeLabel = computed(() => {
 // Token 消耗总量
 const totalTokensFormatted = computed(() => {
   const range = timeRange.value
-  if (selectedVendorId.value === 'all') {
+  const vid = selectedVendorId.value
+
+  if (vid === 'all') {
     const totals = { today: tokenStats.value.todayTotal, week: tokenStats.value.weekTotal, month: tokenStats.value.monthTotal, year: tokenStats.value.yearTotal }
     return formatTokens(totals[range] || 0)
   }
+
   // 按 vendor 筛选：从 vendorModelUsage 中汇总该 vendor 的模型用量
-  const vUsage = tokenStats.value.vendorModelUsage?.[range]?.[selectedVendorId.value] || {}
+  const vUsage = tokenStats.value.vendorModelUsage?.[range]?.[vid] || {}
   const total = Object.values(vUsage).reduce((s, v) => s + v, 0)
+
+  // 今日粒度下，若 vendorModelUsage 值为 0 但模型 key 存在，则从 hourlyDeltas 聚合（数据源对齐）
+  if (range === 'today' && total === 0 && Object.keys(vUsage).length > 0) {
+    const hourlyDeltas = tokenStats.value.hourlyDeltas || []
+    let aggregated = 0
+    for (const d of hourlyDeltas) {
+      for (const [m, t] of Object.entries(d.models || {})) {
+        if (m in vUsage) aggregated += t
+      }
+    }
+    return formatTokens(aggregated)
+  }
+
   return formatTokens(total)
 })
 
 // TOP3 模型
 const top3Tokens = computed(() => {
   const range = timeRange.value
+  const vid = selectedVendorId.value
   let usage
-  if (selectedVendorId.value === 'all') {
+  if (vid === 'all') {
     usage = tokenStats.value.modelUsage?.[range] || {}
   } else {
-    usage = tokenStats.value.vendorModelUsage?.[range]?.[selectedVendorId.value] || {}
+    usage = tokenStats.value.vendorModelUsage?.[range]?.[vid] || {}
+    // 今日粒度下，若值为 0 但模型 key 存在，从 hourlyDeltas 获取真实值
+    if (range === 'today') {
+      const totalFromVUsage = Object.values(usage).reduce((s, v) => s + v, 0)
+      if (totalFromVUsage === 0 && Object.keys(usage).length > 0) {
+        const hourlyDeltas = tokenStats.value.hourlyDeltas || []
+        const aggregated = {}
+        for (const d of hourlyDeltas) {
+          for (const [m, t] of Object.entries(d.models || {})) {
+            if (m in usage) aggregated[m] = (aggregated[m] || 0) + t
+          }
+        }
+        usage = aggregated
+      }
+    }
   }
   return Object.entries(usage)
     .sort((a, b) => b[1] - a[1])

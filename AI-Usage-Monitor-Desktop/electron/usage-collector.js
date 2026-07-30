@@ -534,6 +534,26 @@ function getTodayHourlyDeltas(vendorId) {
   const todayKey = getTodayKey()
   const snapshots = stats.hourlySnapshots?.[todayKey] || {}
 
+  // 计算基线：昨日各 vendor 的最后一次快照累计值（用于修正当天第一个快照的 delta）
+  const yesterday = new Date()
+  yesterday.setDate(yesterday.getDate() - 1)
+  const yesterdayKey = `${yesterday.getFullYear()}-${String(yesterday.getMonth() + 1).padStart(2, '0')}-${String(yesterday.getDate()).padStart(2, '0')}`
+  const yesterdaySnapshots = stats.hourlySnapshots?.[yesterdayKey] || {}
+  let baselineTotal = 0
+  const baselineModels = {}
+  for (const [key, vendorSnap] of Object.entries(yesterdaySnapshots)) {
+    if (!vendorSnap || typeof vendorSnap !== 'object') continue
+    if (vendorId && key !== `vendor_${vendorId}`) continue
+    const hours = Object.keys(vendorSnap).sort()
+    if (hours.length > 0) {
+      const last = vendorSnap[hours[hours.length - 1]]
+      baselineTotal += last.totalTokens || 0
+      for (const [modelName, modelData] of Object.entries(last.models || {})) {
+        baselineModels[modelName] = (baselineModels[modelName] || 0) + (modelData.tokens || 0)
+      }
+    }
+  }
+
   // 合并所有 vendor 的快照数据（按小时聚合）
   const mergedSnapshots = {}
   for (const [key, vendorSnap] of Object.entries(snapshots)) {
@@ -587,14 +607,31 @@ function getTodayHourlyDeltas(vendorId) {
         totalTokens: curr.totalTokens
       })
     } else {
-      // 第一个快照 — 与当天 00:00 的差值（如果有的话）
-      deltas.push({
-        hour,
-        delta: curr.totalTokens,
-        requests: curr.totalRequests || 0,
-        models: Object.fromEntries(Object.entries(curr.models || {}).map(([n, d]) => [n, d.tokens])),
-        totalTokens: curr.totalTokens
-      })
+      // 第一个快照 — 使用昨日最后快照作为基线，更精确地反映当天实际增量
+      if (baselineTotal > 0) {
+        const adjustedDelta = Math.max(0, curr.totalTokens - baselineTotal)
+        const modelDeltas = {}
+        for (const [name, data] of Object.entries(curr.models || {})) {
+          const mDelta = Math.max(0, data.tokens - (baselineModels[name] || 0))
+          if (mDelta > 0) modelDeltas[name] = mDelta
+        }
+        deltas.push({
+          hour,
+          delta: adjustedDelta,
+          requests: curr.totalRequests || 0,
+          models: modelDeltas,
+          totalTokens: curr.totalTokens
+        })
+      } else {
+        // 无基线数据（首次运行），只能使用当前累计值
+        deltas.push({
+          hour,
+          delta: curr.totalTokens,
+          requests: curr.totalRequests || 0,
+          models: Object.fromEntries(Object.entries(curr.models || {}).map(([n, d]) => [n, d.tokens])),
+          totalTokens: curr.totalTokens
+        })
+      }
     }
     prev = curr
   }
