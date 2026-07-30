@@ -140,6 +140,21 @@ async function checkForUpdates() {
     const result = await window.electronAPI.checkForUpdates()
     if (result.success) {
       updateResult.value = result
+      // 有更新时获取累计更新日志
+      if (result.hasUpdate) {
+        try {
+          const cl = await window.electronAPI.getChangelog()
+          if (cl.success && cl.list.length > 0) {
+            // 过滤出大于当前版本、不大于最新版本的条目
+            const curVer = appVersion.value
+            const latestVer = result.latestVersion
+            updateResult.value = {
+              ...result,
+              changelog: cl.list.filter(e => isNewerThan(curVer, e.version) && !isNewerThan(e.version, latestVer))
+            }
+          }
+        } catch { /* 日志非关键，忽略 */ }
+      }
     } else {
       updateError.value = result.error || '检查失败'
     }
@@ -149,11 +164,28 @@ async function checkForUpdates() {
   checkingUpdate.value = false
 }
 
+// 简单语义化版本比较：v1 > v2 ?
+function isNewerThan(v1, v2) {
+  const a = (v1 || '').split('.').map(Number)
+  const b = (v2 || '').split('.').map(Number)
+  for (let i = 0; i < Math.max(a.length, b.length); i++) {
+    const na = a[i] || 0, nb = b[i] || 0
+    if (na !== nb) return na > nb
+  }
+  return false
+}
+
 // 打开下载页面
 async function openDownloadPage() {
   if (updateResult.value?.downloadUrl && window.electronAPI) {
     await window.electronAPI.openExternal(updateResult.value.downloadUrl)
   }
+  closeUpdateResult()
+}
+
+function closeUpdateResult() {
+  updateResult.value = null
+  updateError.value = ''
 }
 
 // 切换开关
@@ -224,7 +256,12 @@ async function openChangelog() {
   try {
     const result = await window.electronAPI.getChangelog()
     if (result.success) {
-      changelog.value = result.list
+      // 仅保留当前版本的更新日志
+      const current = result.list.find(e => e.version === appVersion.value)
+      changelog.value = current ? [current] : []
+      if (changelog.value.length === 0) {
+        changelogError.value = '未找到当前版本的更新日志'
+      }
     } else {
       changelogError.value = result.error || '获取失败'
     }
@@ -321,25 +358,7 @@ async function openChangelog() {
           </button>
         </div>
 
-        <!-- 更新结果 -->
-        <template v-if="updateResult">
-          <div class="setting-divider"></div>
-          <div class="update-result">
-            <template v-if="updateResult.hasUpdate">
-              <div class="update-badge new">有新版本 v{{ updateResult.latestVersion }}</div>
-              <p v-if="updateResult.releaseNotes" class="update-notes">{{ updateResult.releaseNotes }}</p>
-              <button class="update-download-btn" @click="openDownloadPage">前往下载</button>
-            </template>
-            <template v-else>
-              <div class="update-badge latest">已是最新版本</div>
-            </template>
-          </div>
-        </template>
-
-        <template v-if="updateError">
-          <div class="setting-divider"></div>
-          <div class="update-error">{{ updateError }}</div>
-        </template>
+<!-- 结果在内联区域移除，改为下方弹窗展示 -->
 
         <div class="setting-divider"></div>
         <div class="setting-item">
@@ -496,6 +515,65 @@ async function openChangelog() {
             </div>
           </template>
         </div>
+      </div>
+    </div>
+  </Teleport>
+
+  <!-- 更新结果弹窗 -->
+  <Teleport to="body">
+    <div v-if="updateResult || updateError" class="modal-overlay" @click.self="closeUpdateResult">
+      <div class="update-result-modal">
+        <div class="update-modal-header">
+          <span>检查更新</span>
+          <button class="modal-close-btn" @click="closeUpdateResult">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+            </svg>
+          </button>
+        </div>
+
+        <template v-if="updateError">
+          <div class="update-modal-icon error">
+            <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="#ef4444" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
+            </svg>
+          </div>
+          <p class="update-modal-error">{{ updateError }}</p>
+          <button class="update-modal-btn secondary" @click="closeUpdateResult">关闭</button>
+        </template>
+
+        <template v-else-if="updateResult && updateResult.hasUpdate">
+          <div class="update-modal-icon new">
+            <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="#d97706" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/>
+            </svg>
+          </div>
+          <div class="update-modal-badge new">发现新版本 v{{ updateResult.latestVersion }}</div>
+          <div v-if="updateResult.changelog && updateResult.changelog.length > 0" class="update-modal-cl-list">
+            <div v-for="(entry, idx) in updateResult.changelog" :key="idx" class="update-modal-cl-entry">
+              <div class="update-modal-cl-version">v{{ entry.version }} <span class="update-modal-cl-date">{{ entry.date }}</span></div>
+              <ul class="update-modal-cl-changes">
+                <li v-for="(change, ci) in entry.changes" :key="ci">{{ change }}</li>
+              </ul>
+            </div>
+          </div>
+          <p v-else-if="updateResult.releaseNotes" class="update-modal-notes">{{ updateResult.releaseNotes }}</p>
+          <div class="update-modal-actions">
+            <button class="update-modal-btn secondary" @click="closeUpdateResult">稍后再说</button>
+            <button class="update-modal-btn primary" @click="openDownloadPage">前往下载</button>
+          </div>
+        </template>
+
+        <template v-else-if="updateResult">
+          <div class="update-modal-icon latest">
+            <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="#16a34a" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/>
+            </svg>
+          </div>
+          <div class="update-modal-badge latest">已是最新版本</div>
+          <p class="update-modal-desc">当前版本 v{{ appVersion }} 已是最新</p>
+          <button class="update-modal-btn primary" @click="closeUpdateResult">确定</button>
+        </template>
       </div>
     </div>
   </Teleport>
@@ -848,52 +926,6 @@ async function openChangelog() {
 .spinning {
   animation: spin 0.8s linear infinite;
 }
-.update-result {
-  padding: 1.125rem 1.25rem;
-}
-.update-badge {
-  display: inline-flex;
-  align-items: center;
-  padding: 0.3rem 0.7rem;
-  border-radius: 6px;
-  font-size: 0.8125rem;
-  font-weight: 600;
-}
-.update-badge.new {
-  background: #fef3c7;
-  color: #92400e;
-}
-.update-badge.latest {
-  background: #d1fae5;
-  color: #065f46;
-}
-.update-notes {
-  margin: 0.625rem 0;
-  font-size: 0.8rem;
-  color: #64748b;
-  line-height: 1.6;
-  white-space: pre-wrap;
-}
-.update-download-btn {
-  margin-top: 0.5rem;
-  padding: 0.5rem 1.25rem;
-  border: none;
-  border-radius: 8px;
-  background: #467CFE;
-  color: white;
-  font-size: 0.8125rem;
-  font-weight: 600;
-  cursor: pointer;
-  transition: background 0.2s;
-}
-.update-download-btn:hover {
-  background: #3563d9;
-}
-.update-error {
-  padding: 0.5rem 1.25rem;
-  font-size: 0.8125rem;
-  color: #b91c1c;
-}
 
 /* 更新日志按钮 */
 .changelog-btn {
@@ -1003,6 +1035,151 @@ async function openChangelog() {
 }
 .changelog-error {
   color: #b91c1c;
+}
+
+/* ====== 更新结果弹窗 ====== */
+.update-result-modal {
+  background: white;
+  border-radius: 14px;
+  padding: 1.5rem 2rem;
+  max-width: 400px;
+  width: 100%;
+  box-shadow: 0 20px 60px rgba(0,0,0,0.15);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.75rem;
+  text-align: center;
+}
+.update-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  font-size: 1rem;
+  font-weight: 600;
+  color: #1e293b;
+}
+.update-modal-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-top: 0.25rem;
+}
+.update-modal-badge {
+  display: inline-flex;
+  padding: 0.35rem 0.85rem;
+  border-radius: 6px;
+  font-size: 0.875rem;
+  font-weight: 600;
+}
+.update-modal-badge.new {
+  background: #fef3c7;
+  color: #92400e;
+}
+.update-modal-badge.latest {
+  background: #d1fae5;
+  color: #065f46;
+}
+.update-modal-notes {
+  margin: 0;
+  font-size: 0.8rem;
+  color: #64748b;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  width: 100%;
+  text-align: left;
+}
+.update-modal-desc {
+  margin: 0;
+  font-size: 0.85rem;
+  color: #64748b;
+}
+.update-modal-error {
+  margin: 0;
+  font-size: 0.85rem;
+  color: #b91c1c;
+}
+.update-modal-actions {
+  display: flex;
+  gap: 0.5rem;
+  width: 100%;
+  margin-top: 0.25rem;
+}
+.update-modal-btn {
+  flex: 1;
+  padding: 0.55rem 1rem;
+  border-radius: 8px;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s;
+  border: none;
+}
+.update-modal-btn.primary {
+  background: #467CFE;
+  color: white;
+}
+.update-modal-btn.primary:hover {
+  background: #3563d9;
+}
+.update-modal-btn.secondary {
+  background: #f1f5f9;
+  color: #475569;
+  border: 1px solid #e2e8f0;
+}
+.update-modal-btn.secondary:hover {
+  background: #e2e8f0;
+}
+
+/* 弹窗内版本更新列表 */
+.update-modal-cl-list {
+  width: 100%;
+  max-height: 260px;
+  overflow-y: auto;
+  text-align: left;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+.update-modal-cl-entry {
+  border: 1px solid #f1f5f9;
+  border-radius: 8px;
+  padding: 0.6rem 0.85rem;
+}
+.update-modal-cl-version {
+  font-size: 0.85rem;
+  font-weight: 700;
+  color: #1e293b;
+  margin-bottom: 0.35rem;
+}
+.update-modal-cl-date {
+  font-size: 0.72rem;
+  font-weight: 400;
+  color: #94a3b8;
+  margin-left: 0.5rem;
+}
+.update-modal-cl-changes {
+  margin: 0;
+  padding-left: 1rem;
+  list-style: none;
+}
+.update-modal-cl-changes li {
+  position: relative;
+  font-size: 0.78rem;
+  color: #475569;
+  line-height: 1.65;
+  padding-left: 0.5rem;
+}
+.update-modal-cl-changes li::before {
+  content: '';
+  position: absolute;
+  left: -0.65rem;
+  top: 0.55em;
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: #cbd5e1;
 }
 
 @container (max-width: 480px) {

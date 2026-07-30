@@ -36,7 +36,6 @@ npm run electron:dev
 使用以下命令打包项目。  
 Use the following commands to build the project.
 ```bash
-npm run build
 npm run dist
 ```
 ## 快速安装 Quick Installation
