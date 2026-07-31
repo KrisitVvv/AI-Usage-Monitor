@@ -89,14 +89,10 @@ async function handleSave() {
     saving.value = false
   }
 }
-
-function handleOverlayClick(e) {
-  if (e.target === e.currentTarget) emit('close')
-}
 </script>
 
 <template>
-  <div class="modal-overlay" @click="handleOverlayClick">
+  <div class="modal-overlay">
     <div class="modal-dialog">
       <!-- 头部 -->
       <div class="modal-header">

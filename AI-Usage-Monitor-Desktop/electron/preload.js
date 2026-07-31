@@ -64,6 +64,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
   checkForUpdates: () => ipcRenderer.invoke('check-for-updates'),
   getAppVersion: () => ipcRenderer.invoke('get-app-version'),
   getChangelog: () => ipcRenderer.invoke('get-changelog'),
+  getInstallType: () => ipcRenderer.invoke('get-install-type'),
+  downloadUpdate: (url) => ipcRenderer.invoke('download-update', url),
+  installUpdate: (filePath) => ipcRenderer.invoke('install-update', filePath),
+  onUpdateDownloadProgress: (callback) => {
+    const handler = (_event, data) => callback(data)
+    ipcRenderer.on('update-download-progress', handler)
+    return () => ipcRenderer.removeListener('update-download-progress', handler)
+  },
 
   // ---------- 缓存管理 ----------
   getCacheSize: () => ipcRenderer.invoke('get-cache-size'),

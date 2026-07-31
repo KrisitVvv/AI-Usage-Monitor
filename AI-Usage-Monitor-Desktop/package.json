@@ -5,6 +5,7 @@
   "scripts": {
     "dev": "vite",
     "electron:dev": "concurrently \"vite\" \"electron .\"",
+    "electron:dev:portable": "concurrently \"vite\" \"electron . --portable\"",
     "build": "vite build",
     "dist": "npm run build && electron-builder"
   },

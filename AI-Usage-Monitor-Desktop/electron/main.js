@@ -1,10 +1,134 @@
 const { app, BrowserWindow, ipcMain, session, Tray, Menu, nativeImage, shell } = require('electron')
 const path = require('path')
 const fs = require('fs')
+const https = require('https')
+const { spawn } = require('child_process')
 const { collectAll, recordTokenUsage, getTokenStats, resetDeepSeekBudget, flushTokenStats, loadTokenStats, recordHourlySnapshot, getPrevModelTokens } = require('./usage-collector')
+
+// ===== 语义化版本比较工具 =====
+// 解析 "v1.2.3" / "1.2.3" / "1.2.3-beta.1" 等版本号
+function parseVersion(version) {
+  const str = String(version || '').trim().replace(/^v/i, '')
+  const match = str.match(/^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+([0-9A-Za-z.-]+))?$/)
+  if (!match) return null
+  return {
+    major: parseInt(match[1], 10),
+    minor: parseInt(match[2], 10),
+    patch: parseInt(match[3], 10),
+    prerelease: match[4] || ''
+  }
+}
+
+function comparePrerelease(a, b) {
+  if (!a && !b) return 0
+  if (!a) return 1
+  if (!b) return -1
+  const pa = a.split('.')
+  const pb = b.split('.')
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const sa = pa[i]
+    const sb = pb[i]
+    if (sa === undefined) return -1
+    if (sb === undefined) return 1
+    if (sa === sb) continue
+    const na = parseInt(sa, 10)
+    const nb = parseInt(sb, 10)
+    const isNa = /^\d+$/.test(sa)
+    const isNb = /^\d+$/.test(sb)
+    if (isNa && isNb) return na > nb ? 1 : -1
+    if (isNa) return -1
+    if (isNb) return 1
+    return sa > sb ? 1 : -1
+  }
+  return 0
+}
+
+// v1 > v2 返回 1，v1 < v2 返回 -1，相等返回 0
+function compareVersions(v1, v2) {
+  const a = parseVersion(v1)
+  const b = parseVersion(v2)
+  if (!a || !b) return String(v1).localeCompare(String(v2)) // 解析失败兜底
+  if (a.major !== b.major) return a.major > b.major ? 1 : -1
+  if (a.minor !== b.minor) return a.minor > b.minor ? 1 : -1
+  if (a.patch !== b.patch) return a.patch > b.patch ? 1 : -1
+  return comparePrerelease(a.prerelease, b.prerelease)
+}
 
 // 设置应用名称（影响开机自启动注册表条目名称等）
 app.name = 'AI Usage Monitor'
+
+// ===== 更新下载与安装工具 =====
+
+// 判断当前运行的是安装版还是免安装版
+// electron-builder 的 portable 版运行时设置了 PORTABLE_EXECUTABLE_DIR 环境变量
+// 开发模式下（electron . 无该变量）可通过 --portable 参数强制模拟免安装版
+function getInstallType() {
+  if (process.argv.includes('--portable')) return 'portable'
+  return process.env.PORTABLE_EXECUTABLE_DIR ? 'portable' : 'installer'
+}
+
+// 从 Release 资产中匹配当前安装类型对应的安装包
+// 命名约定：含 "Setup" 的 .exe 为安装版，不含的 .exe 为免安装版
+function matchUpdateAsset(assets, installType) {
+  const exeAssets = assets.filter(a => /\.exe$/i.test(a.name))
+  if (installType === 'installer') {
+    return exeAssets.find(a => /setup/i.test(a.name)) || exeAssets[0] || null
+  }
+  return exeAssets.find(a => !/setup/i.test(a.name)) || exeAssets[0] || null
+}
+
+// 流式下载文件（支持 GitHub 302 重定向），并上报下载进度
+function downloadFileWithProgress(url, savePath, onProgress, redirects = 0) {
+  return new Promise((resolve, reject) => {
+    if (redirects > 5) {
+      reject(new Error('重定向次数过多'))
+      return
+    }
+    const req = https.get(url, { headers: { 'User-Agent': 'AI-Usage-Monitor' } }, (res) => {
+      // 收到响应后清除空闲超时，避免大文件下载被误判
+      req.setTimeout(0)
+
+      if ([301, 302, 303, 307, 308].includes(res.statusCode)) {
+        const location = res.headers.location
+        res.resume()
+        if (!location) {
+          reject(new Error('重定向地址缺失'))
+          return
+        }
+        resolve(downloadFileWithProgress(location, savePath, onProgress, redirects + 1))
+        return
+      }
+      if (res.statusCode >= 400) {
+        res.resume()
+        reject(new Error(`HTTP ${res.statusCode}`))
+        return
+      }
+      const total = parseInt(res.headers['content-length'] || '0', 10)
+      let received = 0
+      const file = fs.createWriteStream(savePath)
+      res.on('data', (chunk) => {
+        received += chunk.length
+        onProgress(received, total)
+      })
+      res.pipe(file)
+      file.on('finish', () => file.close(() => resolve(savePath)))
+      file.on('error', (err) => {
+        try { fs.unlinkSync(savePath) } catch { /* 忽略 */ }
+        reject(err)
+      })
+      res.on('error', (err) => {
+        try { fs.unlinkSync(savePath) } catch { /* 忽略 */ }
+        reject(err)
+      })
+    })
+
+    // 30 秒内无数据则判定为网络阻塞，中断下载并给出可操作提示
+    req.setTimeout(30000, () => {
+      req.destroy(new Error('下载超时（长时间无数据），请检查网络连接后重试'))
+    })
+    req.on('error', reject)
+  })
+}
 
 let mainWindow = null
 let collectTimer = null
@@ -531,6 +655,12 @@ app.whenReady().then(() => {
     return app.getVersion()
   })
 
+  // ---------- 判断当前应用是安装版还是免安装版 ----------
+  // electron-builder 的 portable 版运行时设置了 PORTABLE_EXECUTABLE_DIR 环境变量
+  ipcMain.handle('get-install-type', () => {
+    return getInstallType()
+  })
+
   // ---------- 检查 GitHub 更新 ----------
   ipcMain.handle('check-for-updates', async () => {
     try {
@@ -541,18 +671,63 @@ app.whenReady().then(() => {
       const release = await response.json()
       const latestVersion = (release.tag_name || '').replace(/^v/i, '')
       const currentVersion = app.getVersion()
-      const downloadUrl = release.html_url
       const releaseNotes = release.body || ''
+      // 匹配当前安装类型的下载资产
+      const asset = matchUpdateAsset(release.assets || [], getInstallType())
       return {
         success: true,
         currentVersion,
         latestVersion,
-        hasUpdate: latestVersion !== currentVersion,
-        downloadUrl,
+        hasUpdate: compareVersions(latestVersion, currentVersion) > 0,
+        installType: getInstallType(),
+        downloadUrl: release.html_url,
+        assetUrl: asset ? asset.browser_download_url : null,
+        assetName: asset ? asset.name : null,
+        assetSize: asset ? asset.size : 0,
         releaseNotes
       }
     } catch (e) {
       console.error('[Main] 检查更新失败:', e.message)
+      return { success: false, error: e.message }
+    }
+  })
+
+  // ---------- 下载更新安装包（自动更新） ----------
+  ipcMain.handle('download-update', async (event, downloadUrl) => {
+    try {
+      const assetName = decodeURIComponent(path.basename(new URL(downloadUrl).pathname))
+      const dir = path.join(app.getPath('userData'), 'updates')
+      fs.mkdirSync(dir, { recursive: true })
+      const savePath = path.join(dir, assetName)
+      await downloadFileWithProgress(downloadUrl, savePath, (received, total) => {
+        event.sender.send('update-download-progress', {
+          received,
+          total,
+          percent: total > 0 ? Math.round((received / total) * 100) : 0
+        })
+      })
+      return { success: true, filePath: savePath }
+    } catch (e) {
+      console.error('[Main] 下载更新失败:', e.message)
+      return { success: false, error: e.message }
+    }
+  })
+
+  // ---------- 启动安装程序（安装版自动更新） ----------
+  ipcMain.handle('install-update', async (_event, filePath) => {
+    try {
+      if (!filePath || !fs.existsSync(filePath)) {
+        return { success: false, error: '安装包不存在' }
+      }
+      // 以独立进程启动安装程序，随后退出当前应用，由安装程序接管
+      const child = spawn(filePath, [], { detached: true, stdio: 'ignore' })
+      child.unref()
+      setTimeout(() => {
+        app.quit()
+      }, 1000)
+      return { success: true }
+    } catch (e) {
+      console.error('[Main] 启动安装程序失败:', e.message)
       return { success: false, error: e.message }
     }
   })

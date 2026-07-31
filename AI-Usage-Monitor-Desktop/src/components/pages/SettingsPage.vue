@@ -1,5 +1,5 @@
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, onUnmounted } from 'vue'
 
 // 开机自启动开关状态
 const autoLaunch = ref(false)
@@ -16,8 +16,17 @@ const showChangelog = ref(false)
 // 检查更新状态
 const appVersion = ref('')
 const checkingUpdate = ref(false)
-const updateResult = ref(null) // { hasUpdate, latestVersion, downloadUrl, releaseNotes }
+const updateResult = ref(null) // { hasUpdate, latestVersion, downloadUrl, assetUrl, installType, ... }
 const updateError = ref('')
+// 自动更新状态（安装版）
+const installType = ref('') // 'installer' | 'portable'
+const downloading = ref(false)
+const installing = ref(false)
+const downloadError = ref('')
+const downloadProgress = ref(0) // 0-100
+const downloadReceived = ref(0) // 已下载字节
+const downloadTotal = ref(0) // 总字节（可能为 0）
+let offDownloadProgress = null // 下载进度事件取消订阅函数
 
 // 缓存管理状态
 const cacheSize = ref(0)
@@ -91,9 +100,27 @@ onMounted(async () => {
     } catch (e) {
       appVersion.value = '未知'
     }
+    try {
+      installType.value = await window.electronAPI.getInstallType()
+    } catch (e) {
+      installType.value = ''
+    }
+    // 订阅下载进度
+    offDownloadProgress = window.electronAPI.onUpdateDownloadProgress((data) => {
+      if (!data) return
+      downloadReceived.value = data.received || 0
+      downloadTotal.value = data.total || 0
+      if (typeof data.percent === 'number') {
+        downloadProgress.value = data.percent
+      }
+    })
     await loadCacheSize()
   }
   loading.value = false
+})
+
+onUnmounted(() => {
+  if (offDownloadProgress) offDownloadProgress()
 })
 
 // 加载缓存大小
@@ -145,12 +172,10 @@ async function checkForUpdates() {
         try {
           const cl = await window.electronAPI.getChangelog()
           if (cl.success && cl.list.length > 0) {
-            // 过滤出大于当前版本、不大于最新版本的条目
-            const curVer = appVersion.value
-            const latestVer = result.latestVersion
+            // 筛选：仅展示版本号高于本地当前版本的更新日志
             updateResult.value = {
               ...result,
-              changelog: cl.list.filter(e => isNewerThan(curVer, e.version) && !isNewerThan(e.version, latestVer))
+              changelog: filterChangelogByVersion(cl.list, appVersion.value, result.latestVersion)
             }
           }
         } catch { /* 日志非关键，忽略 */ }
@@ -164,28 +189,125 @@ async function checkForUpdates() {
   checkingUpdate.value = false
 }
 
-// 简单语义化版本比较：v1 > v2 ?
-function isNewerThan(v1, v2) {
-  const a = (v1 || '').split('.').map(Number)
-  const b = (v2 || '').split('.').map(Number)
-  for (let i = 0; i < Math.max(a.length, b.length); i++) {
-    const na = a[i] || 0, nb = b[i] || 0
-    if (na !== nb) return na > nb
+// ===== 语义化版本比较工具 =====
+
+// 解析版本号：支持 "v1.2.3" / "1.2.3" / "1.2.3-beta.1" / "1.2.3+build.5"
+function parseVersion(version) {
+  const str = String(version || '').trim().replace(/^v/i, '')
+  const match = str.match(/^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+([0-9A-Za-z.-]+))?$/)
+  if (!match) return null
+  return {
+    major: parseInt(match[1], 10),
+    minor: parseInt(match[2], 10),
+    patch: parseInt(match[3], 10),
+    prerelease: match[4] || ''
   }
-  return false
 }
 
-// 打开下载页面
-async function openDownloadPage() {
-  if (updateResult.value?.downloadUrl && window.electronAPI) {
-    await window.electronAPI.openExternal(updateResult.value.downloadUrl)
+// 比较预发布标识（semver 规则：正式版 > 预发布；alpha < beta < rc）
+function comparePrerelease(a, b) {
+  if (!a && !b) return 0
+  if (!a) return 1
+  if (!b) return -1
+  const pa = a.split('.')
+  const pb = b.split('.')
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const sa = pa[i]
+    const sb = pb[i]
+    if (sa === undefined) return -1
+    if (sb === undefined) return 1
+    if (sa === sb) continue
+    const na = parseInt(sa, 10)
+    const nb = parseInt(sb, 10)
+    const isNa = /^\d+$/.test(sa)
+    const isNb = /^\d+$/.test(sb)
+    if (isNa && isNb) return na > nb ? 1 : -1
+    if (isNa) return -1  // 数字标识 < 字母标识
+    if (isNb) return 1
+    return sa > sb ? 1 : -1
   }
-  closeUpdateResult()
+  return 0
+}
+
+// 语义化版本比较：v1 > v2 返回 1，v1 < v2 返回 -1，相等返回 0
+function compareVersions(v1, v2) {
+  const a = parseVersion(v1)
+  const b = parseVersion(v2)
+  if (!a || !b) return String(v1).localeCompare(String(v2)) // 解析失败兜底
+  if (a.major !== b.major) return a.major > b.major ? 1 : -1
+  if (a.minor !== b.minor) return a.minor > b.minor ? 1 : -1
+  if (a.patch !== b.patch) return a.patch > b.patch ? 1 : -1
+  return comparePrerelease(a.prerelease, b.prerelease)
+}
+
+// v1 是否高于 v2
+function isNewerThan(v1, v2) {
+  return compareVersions(v1, v2) > 0
+}
+
+// 筛选更新日志：版本高于当前本地版本、且不高于最新版本
+function filterChangelogByVersion(list, currentVersion, latestVersion) {
+  return list.filter(e => isNewerThan(e.version, currentVersion) && compareVersions(e.version, latestVersion) <= 0)
+}
+
+// 打开下载页面 / 自动下载安装
+async function openDownloadPage() {
+  const result = updateResult.value
+  if (!result || !window.electronAPI) return
+
+  // 下载失败后，按钮降级为打开 GitHub 下载页
+  if (downloadError.value) {
+    if (result.downloadUrl) {
+      await window.electronAPI.openExternal(result.downloadUrl)
+    }
+    closeUpdateResult()
+    return
+  }
+
+  // 免安装版：打开 GitHub 下载页手动下载
+  if (result.installType !== 'installer' || !result.assetUrl) {
+    if (result.downloadUrl) {
+      await window.electronAPI.openExternal(result.downloadUrl)
+    }
+    closeUpdateResult()
+    return
+  }
+
+  // 安装版：自动下载并启动安装程序
+  downloadError.value = ''
+  downloading.value = true
+  downloadProgress.value = 0
+  downloadReceived.value = 0
+  downloadTotal.value = 0
+  try {
+    const dl = await window.electronAPI.downloadUpdate(result.assetUrl)
+    if (!dl.success) {
+      downloadError.value = dl.error || '下载失败'
+      downloading.value = false
+      return
+    }
+    downloadProgress.value = 100
+    downloading.value = false
+    // 启动安装程序
+    installing.value = true
+    const inst = await window.electronAPI.installUpdate(dl.filePath)
+    if (!inst.success) {
+      downloadError.value = inst.error || '启动安装失败'
+      installing.value = false
+    }
+    // 安装程序已启动，应用即将退出，无需关闭弹窗
+  } catch (e) {
+    downloadError.value = '下载失败: ' + (e.message || '未知错误')
+    downloading.value = false
+    installing.value = false
+  }
 }
 
 function closeUpdateResult() {
   updateResult.value = null
   updateError.value = ''
+  downloadError.value = ''
+  downloadProgress.value = 0
 }
 
 // 切换开关
@@ -383,7 +505,7 @@ async function openChangelog() {
 
   <!-- 反馈弹窗 -->
   <Teleport to="body">
-    <div v-if="showFeedbackModal" class="modal-overlay" @click.self="showFeedbackModal = false">
+    <div v-if="showFeedbackModal" class="modal-overlay">
       <div class="feedback-modal">
         <!-- 菜单视图 -->
         <template v-if="feedbackView === 'menu'">
@@ -480,7 +602,7 @@ async function openChangelog() {
 
   <!-- 更新日志弹窗 -->
   <Teleport to="body">
-    <div v-if="showChangelog" class="modal-overlay" @click.self="showChangelog = false">
+    <div v-if="showChangelog" class="modal-overlay">
       <div class="changelog-modal">
         <div class="changelog-header">
           <span>更新日志</span>
@@ -521,7 +643,7 @@ async function openChangelog() {
 
   <!-- 更新结果弹窗 -->
   <Teleport to="body">
-    <div v-if="updateResult || updateError" class="modal-overlay" @click.self="closeUpdateResult">
+    <div v-if="updateResult || updateError" class="modal-overlay">
       <div class="update-result-modal">
         <div class="update-modal-header">
           <span>检查更新</span>
@@ -555,9 +677,28 @@ async function openChangelog() {
             </div>
           </div>
           <p v-else-if="updateResult.releaseNotes" class="update-modal-notes">{{ updateResult.releaseNotes }}</p>
-          <div class="update-modal-actions">
+          <!-- 下载进度 -->
+          <div v-if="downloading" class="update-download-box">
+            <div class="update-download-bar">
+              <div class="update-download-fill" :style="{ width: downloadProgress + '%' }"></div>
+            </div>
+            <span class="update-download-text">
+              <template v-if="downloadTotal > 0">正在下载安装包 {{ downloadProgress }}%（{{ formatSize(downloadReceived) }} / {{ formatSize(downloadTotal) }}）</template>
+              <template v-else>正在下载安装包... 已下载 {{ formatSize(downloadReceived) }}</template>
+            </span>
+          </div>
+          <div v-else-if="installing" class="update-download-box">
+            <svg class="spinning" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 12a9 9 0 1 1-6.219-8.56"/>
+            </svg>
+            <span class="update-download-text">正在启动安装程序，应用即将退出...</span>
+          </div>
+          <p v-if="downloadError" class="update-modal-error">{{ downloadError }}</p>
+          <div v-if="!downloading && !installing" class="update-modal-actions">
             <button class="update-modal-btn secondary" @click="closeUpdateResult">稍后再说</button>
-            <button class="update-modal-btn primary" @click="openDownloadPage">前往下载</button>
+            <button class="update-modal-btn primary" @click="openDownloadPage">
+              {{ downloadError ? '前往下载页' : (updateResult.installType === 'installer' ? '下载并安装' : '前往下载') }}
+            </button>
           </div>
         </template>
 
@@ -1100,6 +1241,36 @@ async function openChangelog() {
   margin: 0;
   font-size: 0.85rem;
   color: #b91c1c;
+}
+
+/* 下载进度条 */
+.update-download-box {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.25rem 0;
+}
+.update-download-bar {
+  width: 100%;
+  height: 8px;
+  border-radius: 4px;
+  background: #e2e8f0;
+  overflow: hidden;
+}
+.update-download-fill {
+  height: 100%;
+  border-radius: 4px;
+  background: linear-gradient(90deg, #467CFE, #7aa2ff);
+  transition: width 0.2s ease;
+}
+.update-download-text {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.78rem;
+  color: #64748b;
 }
 .update-modal-actions {
   display: flex;

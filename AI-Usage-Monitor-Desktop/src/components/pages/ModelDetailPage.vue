@@ -475,7 +475,7 @@ async function resetBudget() {
 
   <!-- 删除确认弹窗 -->
   <Teleport to="body">
-    <div v-if="showDeleteConfirm" class="modal-overlay" @click.self="showDeleteConfirm = false">
+    <div v-if="showDeleteConfirm" class="modal-overlay">
       <div class="confirm-modal">
         <div class="confirm-header">
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#dc2626" stroke-width="2">

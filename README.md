@@ -31,6 +31,7 @@ git clone https://github.com/KrisitVvv/AI-Usage-Monitor.git
 cd AI-Usage-Monitor/AI-Usage-Monitor-Desktop/
 npm install
 npm run electron:dev
+npm run electron:dev:portable # 调试免安装版
 ```
 ## 打包发行 Packaging and Distribution
 使用以下命令打包项目。  
