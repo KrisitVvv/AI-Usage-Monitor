@@ -627,10 +627,8 @@ async function openChangelog() {
           <div v-else-if="changelogError" class="changelog-error">
             <span>获取更新日志失败：{{ changelogError }}</span>
           </div>
-          <div v-else-if="changelog.length === 0" class="changelog-empty">
-            <span>暂无更新日志</span>
-          </div>
-          <template v-else>
+          <!-- 只要存在日志数据就渲染列表（与是否报错无关） -->
+          <template v-if="!changelogLoading && (changelog.length > 0 || allChangelog.length > 0)">
             <div v-for="(entry, idx) in (changelogExpanded ? allChangelog : changelog)" :key="idx" class="changelog-entry">
               <div class="changelog-version-row">
                 <span class="changelog-version">v{{ entry.version }}</span>
@@ -641,13 +639,17 @@ async function openChangelog() {
                 <li v-for="(change, ci) in entry.changes" :key="ci">{{ change }}</li>
               </ul>
             </div>
-            <button v-if="allChangelog.length > 1" class="changelog-more-btn" @click="changelogExpanded = !changelogExpanded" :title="changelogExpanded ? '收起' : '查看更多历史版本'">
-              <svg :class="{ 'changelog-arrow-up': changelogExpanded }" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <polyline points="6 9 12 15 18 9"/>
-              </svg>
-            </button>
           </template>
+          <div v-else-if="!changelogLoading && !changelogError && changelog.length === 0" class="changelog-empty">
+            <span>暂无更新日志</span>
+          </div>
         </div>
+        <!-- 固定底部的"更多日志"箭头，不随列表滚动 -->
+        <button v-if="!changelogLoading && allChangelog.length > 1" class="changelog-more-btn" @click="changelogExpanded = !changelogExpanded" :title="changelogExpanded ? '收起' : '查看更多历史版本'">
+          <svg :class="{ 'changelog-arrow-up': changelogExpanded }" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="6 9 12 15 18 9"/>
+          </svg>
+        </button>
       </div>
     </div>
   </Teleport>
@@ -1157,12 +1159,12 @@ async function openChangelog() {
   padding: 0.1rem 0.5rem;
 }
 .changelog-more-btn {
+  flex-shrink: 0;
   width: 100%;
   display: flex;
   justify-content: center;
   align-items: center;
-  margin-top: -0.1rem;
-  padding: 0;
+  padding: 0.25rem 0 0;
   border: none;
   background: transparent;
   color: #94a3b8;
