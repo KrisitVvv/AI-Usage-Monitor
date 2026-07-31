@@ -4,6 +4,7 @@ const fs = require('fs')
 const https = require('https')
 const { spawn } = require('child_process')
 const { collectAll, recordTokenUsage, getTokenStats, resetDeepSeekBudget, flushTokenStats, loadTokenStats, recordHourlySnapshot, getPrevModelTokens } = require('./usage-collector')
+const Scheduler = require('./scheduler')
 
 // ===== 语义化版本比较工具 =====
 // 解析 "v1.2.3" / "1.2.3" / "1.2.3-beta.1" 等版本号
@@ -131,7 +132,7 @@ function downloadFileWithProgress(url, savePath, onProgress, redirects = 0) {
 }
 
 let mainWindow = null
-let collectTimer = null
+const scheduler = new Scheduler()
 const dsMonitors = new Map() // vendorId → DeepSeekMonitor
 
 function createWindow() {
@@ -253,6 +254,14 @@ app.whenReady().then(() => {
   createWindow()
   createTray()
 
+  // 初始化统一调度器
+  scheduler.init({
+    collectFn: collectAll,
+    onDataFn: (channel, data) => mainWindow?.webContents.send(channel, data)
+  })
+  scheduler.startBalancePolling()
+  scheduler.startPageRefreshPolling()
+
   ipcMain.on('window-minimize', (event) => {
     BrowserWindow.fromWebContents(event.sender)?.minimize()
   })
@@ -296,7 +305,7 @@ app.whenReady().then(() => {
     writeVendors(vendors)
 
     // 新增供应商后立即触发一次采集
-    triggerCollect()
+    scheduler.collectBalance()
 
     // 如果是 DeepSeek 供应商，确保监听器已启动
     if ((newVendor.provider || '').toLowerCase().includes('deepseek')) {
@@ -342,6 +351,7 @@ app.whenReady().then(() => {
       if (monitor) {
         monitor.stop()
         dsMonitors.delete(vendorId)
+        scheduler.unregisterMonitor(vendorId)
         console.log(`[Main] 已停止并移除供应商 ${vendorId} 的监控实例`)
       }
       // 清除对应的浏览器 session（cookie/localStorage 等）
@@ -374,7 +384,7 @@ app.whenReady().then(() => {
     } catch { /* 忽略 */ }
 
     // 同时触发一次采集，刷新余额等数据
-    triggerCollect()
+    scheduler.collectBalance()
 
     return { success: true }
   })
@@ -431,6 +441,7 @@ app.whenReady().then(() => {
         const monitor = new DeepSeekMonitor(v.id)
         monitor.start(dsMonitorCallback)
         dsMonitors.set(v.id, monitor)
+        scheduler.registerMonitor(v.id, monitor)
         console.log(`[Main] 为供应商 ${v.customName || v.id} 创建监控实例`)
       }
     }
@@ -440,6 +451,7 @@ app.whenReady().then(() => {
       if (!deepseekVendors.find(v => v.id === vendorId)) {
         monitor.stop()
         dsMonitors.delete(vendorId)
+        scheduler.unregisterMonitor(vendorId)
         console.log(`[Main] 移除供应商 ${vendorId} 的监控实例`)
       }
     }
@@ -581,6 +593,16 @@ app.whenReady().then(() => {
     const monitor = getMonitor(vendorId)
     const ok = monitor ? monitor.refreshNow() : false
     return { success: ok }
+  })
+
+  // 统一手动刷新：页面刷新 + 余额采集
+  ipcMain.handle('unified-refresh', async () => {
+    try {
+      const result = await scheduler.manualRefresh()
+      return { success: true, ...result }
+    } catch (e) {
+      return { success: false, error: e.message }
+    }
   })
 
   // 重置 DeepSeek 累计充值
@@ -824,28 +846,10 @@ app.whenReady().then(() => {
     }
   })
 
-  // ====== 30 秒自动采集 ======
-  function triggerCollect() {
-    collectAll().then(data => {
-      mainWindow?.webContents.send('usage-data-updated', data)
-    }).catch(e => {
-      mainWindow?.webContents.send('usage-data-updated', {
-        vendors: [],
-        errors: [`采集失败: ${e.message}`],
-        lastCollect: new Date().toISOString()
-      })
-    })
-  }
-
-  // 立即执行首次采集
-  triggerCollect()
-
-  // 每 30 秒执行一次
-  collectTimer = setInterval(triggerCollect, 30_000)
 })
 
 app.on('window-all-closed', () => {
-  if (collectTimer) clearInterval(collectTimer)
+  scheduler.stop()
   for (const [, monitor] of dsMonitors) monitor.stop()
   dsMonitors.clear()
   if (process.platform !== 'darwin') app.quit()
@@ -857,7 +861,7 @@ app.on('before-quit', (event) => {
   if (isQuitting) return
   isQuitting = true
   event.preventDefault()
-  if (collectTimer) clearInterval(collectTimer)
+  scheduler.stop()
   const stopPromises = [...dsMonitors.values()].map(m => m.stop())
   Promise.all(stopPromises).then(() => {
     flushTokenStats()

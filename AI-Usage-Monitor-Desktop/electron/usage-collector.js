@@ -486,7 +486,8 @@ function recordHourlySnapshot(domData, vendorId) {
 
   const now = new Date()
   const todayKey = getTodayKey()
-  const hourKey = `${String(now.getHours()).padStart(2, '0')}:00`
+  // 使用完整时间作为 key（HH:MM），同一小时内多次快照（整点+手动刷新）互不覆盖
+  const hourKey = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`
 
   if (!stats.hourlySnapshots[todayKey]) stats.hourlySnapshots[todayKey] = {}
 
@@ -494,12 +495,13 @@ function recordHourlySnapshot(domData, vendorId) {
   const vendorKey = vendorId ? `vendor_${vendorId}` : 'default'
   if (!stats.hourlySnapshots[todayKey][vendorKey]) stats.hourlySnapshots[todayKey][vendorKey] = {}
 
-  // 记录此刻的累计值
+  // 记录此刻的累计值（minutes 用于区分整点定时快照与小时内手动刷新）
   const snapshot = {
     totalTokens: parseInt(domData.totalTokens) || 0,
     totalRequests: parseInt(domData.totalRequests) || 0,
     balance: domData.balance || '',
     totalCost: domData.totalCost || '',
+    minutes: now.getMinutes(),
     models: {}
   }
 
@@ -522,6 +524,26 @@ function recordHourlySnapshot(domData, vendorId) {
 
   throttledWriteTokenStats(stats)
   console.log(`[TokenStats] 快照已记录: ${todayKey} ${hourKey} vendor=${vendorKey} total=${snapshot.totalTokens}`)
+}
+
+/**
+ * 快照增量归属的小时：
+ * - 整点定时快照（key 分钟为 00）：增量属于上一小时（如 11:00 快照增量计入 10:00）
+ * - 小时内手动刷新（key 分钟非 00）：增量属于当前小时（如 10:30 刷新计入 10:00）
+ * 返回 -1 表示归属昨日（00:00 整点快照的增量属于昨天 23:00，今日图表不显示）
+ * @param {string} hourKey - 快照 key，格式 "HH:MM"；旧数据无分钟信息按整点处理
+ */
+function getAssignHour(hourKey) {
+  const parts = String(hourKey).split(':')
+  const h = parseInt(parts[0], 10)
+  const m = parts.length > 1 ? parseInt(parts[1], 10) : 0
+  if (m !== 0) return h
+  const prevHour = (h - 1 + 24) % 24
+  return prevHour === 23 ? -1 : prevHour
+}
+
+function formatHourKey(h) {
+  return `${String(h).padStart(2, '0')}:00`
 }
 
 /**
@@ -584,57 +606,66 @@ function getTodayHourlyDeltas(vendorId) {
 
   if (hours.length < 1) return []
 
-  const deltas = []
+  // 按归属小时聚合 delta（整点快照归上一小时，手动刷新归当前小时）
+  const deltasMap = {}
   let prev = null
 
   for (const hour of hours) {
     const curr = mergedSnapshots[hour]
     if (!curr) continue
 
+    // 计算该快照相对前一个快照（或昨日基线）的增量
+    let delta, requests, modelDeltas
     if (prev) {
-      const delta = Math.max(0, curr.totalTokens - prev.totalTokens)
-      const modelDeltas = {}
+      delta = Math.max(0, curr.totalTokens - prev.totalTokens)
+      requests = Math.max(0, (curr.totalRequests || 0) - (prev.totalRequests || 0))
+      modelDeltas = {}
       for (const [name, data] of Object.entries(curr.models || {})) {
         const prevData = prev.models?.[name]
         const mDelta = prevData ? Math.max(0, data.tokens - prevData.tokens) : data.tokens
         if (mDelta > 0) modelDeltas[name] = mDelta
       }
-      deltas.push({
-        hour,
-        delta,
-        requests: Math.max(0, (curr.totalRequests || 0) - (prev.totalRequests || 0)),
-        models: modelDeltas,
-        totalTokens: curr.totalTokens
-      })
-    } else {
+    } else if (baselineTotal > 0) {
       // 第一个快照 — 使用昨日最后快照作为基线，更精确地反映当天实际增量
-      if (baselineTotal > 0) {
-        const adjustedDelta = Math.max(0, curr.totalTokens - baselineTotal)
-        const modelDeltas = {}
-        for (const [name, data] of Object.entries(curr.models || {})) {
-          const mDelta = Math.max(0, data.tokens - (baselineModels[name] || 0))
-          if (mDelta > 0) modelDeltas[name] = mDelta
-        }
-        deltas.push({
-          hour,
-          delta: adjustedDelta,
-          requests: curr.totalRequests || 0,
-          models: modelDeltas,
-          totalTokens: curr.totalTokens
-        })
-      } else {
-        // 无基线数据（首次运行），只能使用当前累计值
-        deltas.push({
-          hour,
-          delta: curr.totalTokens,
-          requests: curr.totalRequests || 0,
-          models: Object.fromEntries(Object.entries(curr.models || {}).map(([n, d]) => [n, d.tokens])),
-          totalTokens: curr.totalTokens
-        })
+      delta = Math.max(0, curr.totalTokens - baselineTotal)
+      requests = curr.totalRequests || 0
+      modelDeltas = {}
+      for (const [name, data] of Object.entries(curr.models || {})) {
+        const mDelta = Math.max(0, data.tokens - (baselineModels[name] || 0))
+        if (mDelta > 0) modelDeltas[name] = mDelta
       }
+    } else {
+      // 无基线数据（首次运行），只能使用当前累计值
+      delta = curr.totalTokens
+      requests = curr.totalRequests || 0
+      modelDeltas = Object.fromEntries(Object.entries(curr.models || {}).map(([n, d]) => [n, d.tokens]))
     }
+
+    // 归属小时调整（整点归上一小时，非整点归当前小时）
+    const assignHour = getAssignHour(hour)
+    if (assignHour < 0) {
+      prev = curr
+      continue
+    }
+    const bucket = deltasMap[assignHour] || (deltasMap[assignHour] = {
+      hour: formatHourKey(assignHour),
+      delta: 0,
+      requests: 0,
+      models: {},
+      totalTokens: curr.totalTokens
+    })
+    bucket.delta += delta
+    bucket.requests += requests
+    for (const [name, t] of Object.entries(modelDeltas)) {
+      bucket.models[name] = (bucket.models[name] || 0) + t
+    }
+
     prev = curr
   }
+
+  const deltas = Object.keys(deltasMap)
+    .sort((a, b) => a - b)
+    .map(k => deltasMap[k])
 
   return deltas
 }

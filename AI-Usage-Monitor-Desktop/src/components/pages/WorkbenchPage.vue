@@ -1,6 +1,7 @@
 <script setup>
 import { ref, onMounted, onUnmounted, watch, computed } from 'vue'
 import * as echarts from 'echarts'
+import CountUpText from '../CountUpText.vue'
 
 // 1. 当前选中的时间范围
 const timeRange = ref('today')
@@ -31,12 +32,12 @@ let unsubscribeToken = null
 let unsubscribeUsage = null
 
 async function manualRefresh() {
-  if (!window.electronAPI?.refreshMonitorNow || manualRefreshing.value) return
+  if (!window.electronAPI?.unifiedRefresh || manualRefreshing.value) return
   manualRefreshing.value = true
   try {
-    await window.electronAPI.refreshMonitorNow()
+    await window.electronAPI.unifiedRefresh()
   } catch (e) {
-    console.warn('[Workbench] 手动刷新失败:', e.message)
+    console.warn('[Workbench] 统一刷新失败:', e.message)
   } finally {
     setTimeout(() => { manualRefreshing.value = false }, 6000)
   }
@@ -83,7 +84,7 @@ function modelColorFn(model) {
   return MODEL_COLORS[model] || MODEL_COLORS.default
 }
 
-// Token 数值格式化
+// Token 数值格式化（缩写：K/W/M/B）
 const formatTokens = (value) => {
   if (!value) return '0'
   if (value >= 1000000000) return (value / 1000000000).toFixed(1).replace(/\.0$/, '') + 'B'
@@ -91,6 +92,25 @@ const formatTokens = (value) => {
   if (value >= 10000) return (value / 10000).toFixed(1).replace(/\.0$/, '') + 'W'
   if (value >= 1000) return (value / 1000).toFixed(1).replace(/\.0$/, '') + 'K'
   return value.toString()
+}
+
+// Token 消耗量显示模式：'abbr' 缩写（K/W/M/B）| 'full' 纯数字（带千分位）
+const tokenNumberMode = ref(localStorage.getItem('tokenNumberMode') || 'abbr')
+
+function toggleTokenNumberMode() {
+  tokenNumberMode.value = tokenNumberMode.value === 'abbr' ? 'full' : 'abbr'
+  localStorage.setItem('tokenNumberMode', tokenNumberMode.value)
+}
+
+// 纯数字显示（不带千分位逗号）
+const formatFullNumber = (value) => {
+  if (!value) return '0'
+  return String(value)
+}
+
+// 按当前模式格式化 Token 消耗量
+const formatTokenDisplay = (value) => {
+  return tokenNumberMode.value === 'full' ? formatFullNumber(value) : formatTokens(value)
 }
 
 // 5. 图表引用
@@ -227,14 +247,14 @@ const timeRangeLabel = computed(() => {
   return map[timeRange.value] || '今天'
 })
 
-// Token 消耗总量
-const totalTokensFormatted = computed(() => {
+// Token 消耗总量（原始数值，用于滚动动画显示）
+const totalTokens = computed(() => {
   const range = timeRange.value
   const vid = selectedVendorId.value
 
   if (vid === 'all') {
     const totals = { today: tokenStats.value.todayTotal, week: tokenStats.value.weekTotal, month: tokenStats.value.monthTotal, year: tokenStats.value.yearTotal }
-    return formatTokens(totals[range] || 0)
+    return totals[range] || 0
   }
 
   // 按 vendor 筛选：从 vendorModelUsage 中汇总该 vendor 的模型用量
@@ -250,10 +270,10 @@ const totalTokensFormatted = computed(() => {
         if (m in vUsage) aggregated += t
       }
     }
-    return formatTokens(aggregated)
+    return aggregated
   }
 
-  return formatTokens(total)
+  return total
 })
 
 // TOP3 模型
@@ -286,8 +306,7 @@ const top3Tokens = computed(() => {
     .map(([model, tokens]) => ({
       name: model,
       displayName: model,
-      usedTokens: tokens,
-      usedTokensFormatted: formatTokens(tokens)
+      usedTokens: tokens
     }))
 })
 
@@ -393,19 +412,33 @@ const updateTokenChart = () => {
     return
   }
 
-  const seriesList = chartData.series.map((s, i, arr) => ({
-    name: s.name,
-    type: 'bar',
-    stack: 'total',
-    data: s.data,
-    itemStyle: {
-      color: modelColorFn(s.rawName),
-      borderRadius: i === arr.length - 1 ? [4, 4, 0, 0] : 0
-    },
-    emphasis: {
-      itemStyle: { borderWidth: 1, borderColor: '#fff', shadowBlur: 8, shadowColor: 'rgba(0,0,0,0.12)' }
+  const seriesList = chartData.series.map((s, i) => {
+    // 动态判断每个数据点是否为该柱子的视觉顶端段：
+    // 仅当该段非零且其上方所有系列在该点都为 0 时，它才是柱子顶端 → 加圆角；
+    // 段与段之间的拼接处保持直角
+    const data = s.data.map((v, j) => {
+      if (!v || v <= 0) return { value: v, itemStyle: { borderRadius: 0 } }
+      const above = chartData.series.slice(i + 1).reduce((sum, up) => sum + (up.data[j] || 0), 0)
+      return {
+        value: v,
+        itemStyle: {
+          borderRadius: above <= 0 ? [4, 4, 0, 0] : 0
+        }
+      }
+    })
+    return {
+      name: s.name,
+      type: 'bar',
+      stack: 'total',
+      data,
+      itemStyle: {
+        color: modelColorFn(s.rawName)
+      },
+      emphasis: {
+        itemStyle: { borderWidth: 1, borderColor: '#fff', shadowBlur: 8, shadowColor: 'rgba(0,0,0,0.12)' }
+      }
     }
-  }))
+  })
 
   const option = {
     tooltip: {
@@ -414,7 +447,11 @@ const updateTokenChart = () => {
       formatter: (params) => {
         if (!params?.length) return ''
         const header = params[0].axisValue
-        const lines = params.map(p => `${p.marker} ${p.seriesName}: ${formatTokens(p.value)}`)
+        const lines = params.map(p => {
+          // data 项可能为 { value, itemStyle } 对象，取其中的原始数值
+          const v = typeof p.value === 'object' && p.value !== null ? p.value.value : p.value
+          return `${p.marker} ${p.seriesName}: ${formatTokenDisplay(v)}`
+        })
         return `${header}<br/>${lines.join('<br/>')}`
       }
     },
@@ -439,6 +476,7 @@ const updateTokenChart = () => {
 watch(timeRange, () => updateTokenChart())
 watch(tokenStats, () => updateTokenChart(), { deep: true })
 watch(selectedVendorId, () => updateTokenChart())
+watch(tokenNumberMode, () => updateTokenChart())
 
 const handleResize = () => {
   if (tokenChartInstance && !tokenChartInstance.isDisposed()) tokenChartInstance.resize()
@@ -563,7 +601,16 @@ onUnmounted(() => {
               </div>
             </div>
             <div class="total-value-wrap">
-              <span class="total-number">{{ totalTokensFormatted }}</span>
+              <span class="total-number"><CountUpText :value="totalTokens" :format="formatTokenDisplay" /></span>
+              <button class="number-mode-toggle" @click="toggleTokenNumberMode" :title="tokenNumberMode === 'abbr' ? '点击切换为纯数字显示' : '点击切换为缩写显示'">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M4 7h16"/>
+                  <path d="M16 3l4 4-4 4"/>
+                  <path d="M20 17H4"/>
+                  <path d="M8 13l-4 4 4 4"/>
+                </svg>
+                <span class="toggle-target">{{ tokenNumberMode === 'abbr' ? '123' : 'KMB' }}</span>
+              </button>
             </div>
             <div class="total-footer">
               <div class="top3-list">
@@ -571,7 +618,7 @@ onUnmounted(() => {
                 <div class="top3-item" v-for="(model, i) in top3Tokens" :key="model.name">
                   <span class="top3-rank" :class="'rank-' + (i + 1)">{{ i + 1 }}</span>
                   <span class="top3-name">{{ model.displayName }}</span>
-                  <span class="top3-value">{{ model.usedTokensFormatted }}</span>
+                  <span class="top3-value"><CountUpText :value="model.usedTokens" :format="formatTokenDisplay" /></span>
                 </div>
               </div>
             </div>
@@ -914,6 +961,7 @@ onUnmounted(() => {
 }
 
 .total-value-wrap {
+  position: relative;
   flex: 1;
   display: flex;
   align-items: center;
@@ -924,6 +972,36 @@ onUnmounted(() => {
   font-size: 3rem;
   font-weight: 800;
   color: #467CFE;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  line-height: 1;
+}
+
+/* Token 消耗量显示模式切换按钮（数字右下角） */
+.number-mode-toggle {
+  position: absolute;
+  right: 0.25rem;
+  bottom: 0.25rem;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 1.7rem;
+  padding: 0 0.6rem;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: white;
+  color: #94a3b8;
+  cursor: pointer;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+  transition: all 0.2s ease;
+}
+.number-mode-toggle:hover {
+  border-color: #467CFE;
+  color: #467CFE;
+  background: #f8faff;
+}
+.number-mode-toggle .toggle-target {
+  font-size: 0.7rem;
+  font-weight: 700;
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   line-height: 1;
 }

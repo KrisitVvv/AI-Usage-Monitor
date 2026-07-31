@@ -33,7 +33,9 @@ const cacheSize = ref(0)
 const clearingCache = ref(false)
 
 // 更新日志（从 GitHub 获取）
-const changelog = ref([])
+const changelog = ref([]) // 当前显示的日志（默认仅本版本）
+const allChangelog = ref([]) // 本版本及以下全部历史日志
+const changelogExpanded = ref(false) // 是否展开显示全部历史日志
 const changelogLoading = ref(false)
 const changelogError = ref('')
 
@@ -371,16 +373,19 @@ async function openGitHub() {
 // 打开更新日志弹窗并加载数据
 async function openChangelog() {
   showChangelog.value = true
-  if (changelog.value.length > 0) return // 已有缓存
+  if (changelog.value.length > 0 || allChangelog.value.length > 0) return // 已有缓存
   if (!window.electronAPI) return
   changelogLoading.value = true
   changelogError.value = ''
   try {
     const result = await window.electronAPI.getChangelog()
     if (result.success) {
-      // 仅保留当前版本的更新日志
-      const current = result.list.find(e => e.version === appVersion.value)
+      // 本版本及以下（<= 当前版本）的全部历史日志
+      allChangelog.value = result.list.filter(e => compareVersions(appVersion.value, e.version) >= 0)
+      // 默认仅显示本版本
+      const current = allChangelog.value.find(e => e.version === appVersion.value)
       changelog.value = current ? [current] : []
+      changelogExpanded.value = false
       if (changelog.value.length === 0) {
         changelogError.value = '未找到当前版本的更新日志'
       }
@@ -626,15 +631,21 @@ async function openChangelog() {
             <span>暂无更新日志</span>
           </div>
           <template v-else>
-            <div v-for="(entry, idx) in changelog" :key="idx" class="changelog-entry">
+            <div v-for="(entry, idx) in (changelogExpanded ? allChangelog : changelog)" :key="idx" class="changelog-entry">
               <div class="changelog-version-row">
                 <span class="changelog-version">v{{ entry.version }}</span>
                 <span class="changelog-date">{{ entry.date }}</span>
+                <span v-if="entry.version === appVersion" class="changelog-current-tag">当前版本</span>
               </div>
               <ul class="changelog-changes">
                 <li v-for="(change, ci) in entry.changes" :key="ci">{{ change }}</li>
               </ul>
             </div>
+            <button v-if="allChangelog.length > 1" class="changelog-more-btn" @click="changelogExpanded = !changelogExpanded" :title="changelogExpanded ? '收起' : '查看更多历史版本'">
+              <svg :class="{ 'changelog-arrow-up': changelogExpanded }" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="6 9 12 15 18 9"/>
+              </svg>
+            </button>
           </template>
         </div>
       </div>
@@ -1092,15 +1103,17 @@ async function openChangelog() {
   background: white;
   border-radius: 14px;
   padding: 1.5rem;
-  max-width: 480px;
+  max-width: 460px;
   width: 100%;
-  max-height: 80vh;
+  /* 控制弹窗最大尺寸：不超过视口高度 65%，且不超过 560px，防止日志过多窗口过大 */
+  max-height: min(65vh, 560px);
   box-shadow: 0 20px 60px rgba(0,0,0,0.15);
   display: flex;
   flex-direction: column;
   gap: 1rem;
 }
 .changelog-header {
+  flex-shrink: 0;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -1109,8 +1122,10 @@ async function openChangelog() {
   color: #1e293b;
 }
 .changelog-list {
+  flex: 1;
+  min-height: 0;
   overflow-y: auto;
-  max-height: calc(80vh - 4rem);
+  padding-right: 0.25rem;
 }
 .changelog-entry {
   padding-bottom: 1rem;
@@ -1132,6 +1147,36 @@ async function openChangelog() {
   font-size: 0.9375rem;
   font-weight: 700;
   color: #1e293b;
+}
+.changelog-current-tag {
+  font-size: 0.6875rem;
+  font-weight: 600;
+  color: #467CFE;
+  background: #eef4ff;
+  border-radius: 999px;
+  padding: 0.1rem 0.5rem;
+}
+.changelog-more-btn {
+  width: 100%;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  margin-top: -0.1rem;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: #94a3b8;
+  cursor: pointer;
+  transition: color 0.2s ease;
+}
+.changelog-more-btn:hover {
+  color: #467CFE;
+}
+.changelog-more-btn svg {
+  transition: transform 0.25s ease;
+}
+.changelog-more-btn svg.changelog-arrow-up {
+  transform: rotate(180deg);
 }
 .changelog-date {
   font-size: 0.75rem;

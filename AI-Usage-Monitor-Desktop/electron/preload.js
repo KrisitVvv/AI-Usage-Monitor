@@ -47,6 +47,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   showLoginWindow: (vendorId) => ipcRenderer.invoke('show-login-window', vendorId),
   refreshMonitor: (vendorId) => ipcRenderer.invoke('refresh-monitor', vendorId),
   refreshMonitorNow: (vendorId) => ipcRenderer.invoke('refresh-monitor-now', vendorId),
+  // 统一手动刷新：页面刷新 + 余额采集
+  unifiedRefresh: () => ipcRenderer.invoke('unified-refresh'),
   onDeepSeekData: (payload) => ipcRenderer.send('deepseek-monitor-data', payload),
 
   // ---------- 开机自启动 ----------

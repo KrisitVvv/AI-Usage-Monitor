@@ -10,7 +10,6 @@ const { BrowserWindow, session } = require('electron')
 const path = require('path')
 
 const DEEPSEEK_USAGE_URL = 'https://platform.deepseek.com/usage'
-const POLL_INTERVAL_MS = 60 * 60 * 1000 // 1 小时
 
 class DeepSeekMonitor {
   constructor(vendorId) {
@@ -27,7 +26,6 @@ class DeepSeekMonitor {
       interceptedUrls: []
     }
     this.onDataCallback = null
-    this._pollTimer = null
     this._navRetryCount = 0
     this._pageReady = false
   }
@@ -47,7 +45,6 @@ class DeepSeekMonitor {
     if (!this.isRunning) return
     this.isRunning = false
     this.status.active = false
-    if (this._pollTimer) { clearInterval(this._pollTimer); this._pollTimer = null }
     if (this.monitorWindow) {
       // 关闭前显式保存 session，确保登录态持久化到磁盘
       try {
@@ -193,34 +190,11 @@ class DeepSeekMonitor {
     await this.readDomData()
 
     this._pageReady = true
-    this.startPolling()
+    // 页面就绪后，由统一调度器 Scheduler 接管定时刷新
+    console.log(`[DS-Monitor:${this.vendorId}] 页面就绪，等待调度器接管轮询`)
   }
 
   sleep(ms) { return new Promise(r => setTimeout(r, ms)) }
-
-  // ====== 每小时轮询 ======
-
-  startPolling() {
-    if (this._pollTimer) clearInterval(this._pollTimer)
-    const now = new Date()
-    const msToNextHour = (60 - now.getMinutes()) * 60 * 1000 - now.getSeconds() * 1000 - now.getMilliseconds()
-    const poll = async () => {
-      if (!this.monitorWindow || !this._pageReady) return
-      const url = this.monitorWindow.webContents.getURL()
-      if (!url.includes('/usage')) {
-        this.monitorWindow.webContents.loadURL(DEEPSEEK_USAGE_URL).catch(() => {})
-        return
-      }
-      console.log(`[DS-Monitor:${this.vendorId}] 整点轮询 — 刷新用量页`)
-      this.monitorWindow.webContents.loadURL(DEEPSEEK_USAGE_URL).catch(() => {})
-    }
-    // 先等到下一个整点，之后每小时整点执行
-    this._pollTimer = setTimeout(() => {
-      poll()
-      this._pollTimer = setInterval(poll, POLL_INTERVAL_MS)
-    }, msToNextHour)
-    console.log(`[DS-Monitor:${this.vendorId}] 已启动整点轮询（${Math.round(msToNextHour / 1000)}s 后首次执行）`)
-  }
 
   // ====== 数据读取 ======
 
@@ -273,26 +247,53 @@ class DeepSeekMonitor {
 
           r.models = [];
           var modelPattern = /deepseek[\\w-]+/gi;
-          var modelNames = [...new Set(text.match(modelPattern) || [])];
-          
+          // 大小写不敏感去重：页面中同一模型可能以不同大小写出现
+          // （如汇总标题 "DeepSeek-V4-Flash" 与明细行 "deepseek-v4-flash"），
+          // 若不合并会把汇总位置的总 Tokens 误记为该模型自己的用量
+          var modelNames = [...new Set((text.match(modelPattern) || []).map(function(n) { return n.toLowerCase(); }))];
+          var lowerText = text.toLowerCase();
+
           for (var name of modelNames) {
             // 跳过汇总标题（如 "DeepSeek-V4"），只保留具体模型变体（如 "deepseek-v4-flash"）
             // 汇总标题通常不含连字符后的小写变体名
-            var lowerName = name.toLowerCase();
-            var suffix = lowerName.replace(/^deepseek[-_]?/i, '');
+            var suffix = name.replace(/^deepseek[-_]?/i, '');
             // 如果去掉 deepseek 前缀后只剩版本号（如 v4），跳过
             if (/^v?\\d+$/.test(suffix) || /^[-_]?$/.test(suffix)) continue;
-            
-            var idx = text.indexOf(name);
-            if (idx === -1) continue;
-            var after = text.substring(idx, idx + 500);
-            
-            var modelData = { name: lowerName.replace(/[_]/g, '-') };
-            var mReq = after.match(/API 请求次数[\\s]*([\\d,]+)/);
-            if (mReq) modelData.requests = parseInt(mReq[1].replace(/,/g, ''));
-            var mTok = after.match(/Tokens[\\s]*([\\d,]+)/);
-            if (mTok) modelData.tokens = parseInt(mTok[1].replace(/,/g, ''));
-            
+
+            // 找出该模型名在页面文本中的所有出现位置
+            var positions = [];
+            var searchIdx = 0;
+            while (true) {
+              var idx = lowerText.indexOf(name, searchIdx);
+              if (idx === -1) break;
+              positions.push(idx);
+              searchIdx = idx + name.length;
+            }
+            if (positions.length === 0) continue;
+
+            // 从每个出现位置提取候选统计，取 Tokens 最小者作为该模型自身用量
+            // （汇总/聚合位置会匹配到总 Tokens，而模型自身累计值一定 ≤ 汇总值）
+            var best = null;
+            for (var p of positions) {
+              var after = text.substring(p, p + 500);
+              var cand = {};
+              var mReq = after.match(/API 请求次数[\\s]*([\\d,]+)/);
+              if (mReq) cand.requests = parseInt(mReq[1].replace(/,/g, ''));
+              var mTok = after.match(/Tokens[\\s]*([\\d,]+)/);
+              if (mTok) cand.tokens = parseInt(mTok[1].replace(/,/g, ''));
+              if (!cand.tokens && !cand.requests) continue;
+              if (!best) {
+                best = cand;
+              } else if (cand.tokens && (!best.tokens || cand.tokens < best.tokens)) {
+                best = cand;
+              }
+            }
+            if (!best) continue;
+
+            var modelData = { name: name.replace(/[_]/g, '-') };
+            if (best.requests) modelData.requests = best.requests;
+            if (best.tokens) modelData.tokens = best.tokens;
+
             if (modelData.requests || modelData.tokens) {
               r.models.push(modelData);
             }
