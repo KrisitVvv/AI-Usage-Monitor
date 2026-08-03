@@ -51,12 +51,6 @@ class KimiMonitor {
     this._refreshTimeout = null
   }
 
-  // ===================== 生命周期 =====================
-
-  /**
-   * 启动监控（不创建窗口，仅注册回调）。
-   * 窗口只在 refreshNow() 或 showLoginWindow() 时按需创建。
-   */
   start(callback) {
     this._callback = callback
   }
