@@ -1,19 +1,3 @@
-/**
- * DeepSeek 余额采集器
- *
- * 从 AppData/vendors.json 中读取用户保存的 DeepSeek API Key，
- * 调用 GET https://api.deepseek.com/user/balance 查询账户余额，
- * 写入 usage-cache.json 并推送至渲染进程。
- *
- * 核心逻辑：累计充值总额 tracking
- *   - totalBudget 记录历史累计充值最高值，只增不减
- *   - remaining  取 API 返回的 total_balance（当前可用余额）
- *   - spent      = totalBudget - remaining
- *   - 每次轮询若 topped_up_balance 超过上一次记录值，差值累加到 totalBudget
- *
- * 定时 30s 轮询；失败时保留上一次缓存数据。
- */
-
 const path = require('path')
 const fs = require('fs')
 const { app } = require('electron')
@@ -36,8 +20,6 @@ let statsCache = null
 function getUserDataPath(filename) {
   return path.join(app.getPath('userData'), filename)
 }
-
-// ---------- 安全的 JSON 读写 ----------
 
 /** 安全读取 JSON 文件，文件不存在或损坏均返回 fallback */
 function safeReadJSON(filePath, fallback) {
@@ -425,34 +407,30 @@ function getTokenStats(vendorId) {
 }
 
 /**
- * 获取上一次快照中各模型的累计 token 数（用于计算增量）
- *
- * 逻辑：
- * 1. 优先用当天最新快照作为基线（正常跨小时场景）
- * 2. 如果当天还没有快照（跨午夜场景），回退到昨天最后一个快照
- *    这样今天第一笔数据只记增量，不会把全量累计值吞进来
- *
  * @param {string} vendorId - 供应商 ID，用于隔离多账号快照
  */
 function getPrevModelTokens(vendorId) {
   const stats = readTokenStats()
   const todayKey = getTodayKey()
 
-  // 尝试从当天快照中获取基线
+  // 从当天快照中获取基线
   const todaySnapshots = stats.hourlySnapshots?.[todayKey] || {}
   let result = mergeSnapshotModels(todaySnapshots, vendorId)
   if (Object.keys(result).length > 0) return result
 
-  // 当天无快照 → 跨午夜，用昨天最后快照作为基线
-  const yesterday = new Date()
-  yesterday.setDate(yesterday.getDate() - 1)
-  const yesterdayKey = `${yesterday.getFullYear()}-${String(yesterday.getMonth() + 1).padStart(2, '0')}-${String(yesterday.getDate()).padStart(2, '0')}`
-  const yesterdaySnapshots = stats.hourlySnapshots?.[yesterdayKey] || {}
-  result = mergeSnapshotModels(yesterdaySnapshots, vendorId)
-  if (Object.keys(result).length > 0) {
-    console.log(`[TokenStats] 跨午夜基线: 使用 ${yesterdayKey} 最后快照, models=${Object.keys(result).length}`)
+  // 向前回溯最近一个非空快照日期
+  const date = new Date()
+  for (let i = 1; i <= 35; i++) {
+    date.setDate(date.getDate() - 1)
+    const key = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
+    const snapshots = stats.hourlySnapshots?.[key] || {}
+    result = mergeSnapshotModels(snapshots, vendorId)
+    if (Object.keys(result).length > 0) {
+      console.log(`[TokenStats] 回退基线: 使用 ${key} 最后快照, models=${Object.keys(result).length}`)
+      return result
+    }
   }
-  return result
+  return {}
 }
 
 /**
@@ -556,24 +534,29 @@ function getTodayHourlyDeltas(vendorId) {
   const todayKey = getTodayKey()
   const snapshots = stats.hourlySnapshots?.[todayKey] || {}
 
-  // 计算基线：昨日各 vendor 的最后一次快照累计值（用于修正当天第一个快照的 delta）
-  const yesterday = new Date()
-  yesterday.setDate(yesterday.getDate() - 1)
-  const yesterdayKey = `${yesterday.getFullYear()}-${String(yesterday.getMonth() + 1).padStart(2, '0')}-${String(yesterday.getDate()).padStart(2, '0')}`
-  const yesterdaySnapshots = stats.hourlySnapshots?.[yesterdayKey] || {}
+  // 计算基线：向前回溯最近一个非空快照日期（最多 35 天）的最后快照累计值
+  // 用于修正当天第一个快照的 delta，覆盖跨午夜、跨月、多天未运行等场景，
+  // 避免昨日无快照导致基线为空、把滚动总量误当当天增量
   let baselineTotal = 0
   const baselineModels = {}
-  for (const [key, vendorSnap] of Object.entries(yesterdaySnapshots)) {
-    if (!vendorSnap || typeof vendorSnap !== 'object') continue
-    if (vendorId && key !== `vendor_${vendorId}`) continue
-    const hours = Object.keys(vendorSnap).sort()
-    if (hours.length > 0) {
-      const last = vendorSnap[hours[hours.length - 1]]
-      baselineTotal += last.totalTokens || 0
-      for (const [modelName, modelData] of Object.entries(last.models || {})) {
-        baselineModels[modelName] = (baselineModels[modelName] || 0) + (modelData.tokens || 0)
+  const baseDate = new Date()
+  for (let i = 1; i <= 35; i++) {
+    baseDate.setDate(baseDate.getDate() - 1)
+    const key = `${baseDate.getFullYear()}-${String(baseDate.getMonth() + 1).padStart(2, '0')}-${String(baseDate.getDate()).padStart(2, '0')}`
+    const baseSnapshots = stats.hourlySnapshots?.[key] || {}
+    for (const [vKey, vendorSnap] of Object.entries(baseSnapshots)) {
+      if (!vendorSnap || typeof vendorSnap !== 'object') continue
+      if (vendorId && vKey !== `vendor_${vendorId}`) continue
+      const hours = Object.keys(vendorSnap).sort()
+      if (hours.length > 0) {
+        const last = vendorSnap[hours[hours.length - 1]]
+        baselineTotal += last.totalTokens || 0
+        for (const [modelName, modelData] of Object.entries(last.models || {})) {
+          baselineModels[modelName] = (baselineModels[modelName] || 0) + (modelData.tokens || 0)
+        }
       }
     }
+    if (Object.keys(baselineModels).length > 0) break
   }
 
   // 合并所有 vendor 的快照数据（按小时聚合）

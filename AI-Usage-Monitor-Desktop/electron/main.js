@@ -528,10 +528,14 @@ app.whenReady().then(() => {
         for (const model of data.models) {
           if (model.tokens > 0) {
             // 计算增量：当前累计值 - 上次快照累计值
+            // 注意：平台展示的是"近30天滚动总量"，跨月/多天未运行后窗口滑动
+            // 会导致当前值小于上次基线（delta 为负）——此时应跳过本次记录，
+            // 当前值会随快照成为新基线，后续刷新自然产生正确的小增量。
+            // 若强行按全量或负数记录，会把滚动总量误记成当天用量。
             const prev = prevTokens[model.name] || 0
             const delta = Math.max(0, model.tokens - prev)
             if (delta === 0) {
-              console.log(`[Main]   ${model.name}: 无增量 (${model.tokens} = 上次 ${prev})`)
+              console.log(`[Main]   ${model.name}: 无增量 (${model.tokens} <= 上次 ${prev})`)
               continue
             }
             const record = {
