@@ -5,6 +5,7 @@ const emit = defineEmits(['close', 'saved'])
 
 // ---------- 供应商与计费模式配置 ----------
 const PROVIDERS = [
+  { name: 'XIAOMI MIMO', billingModels: ['plan', 'token'], requiresApiKey: false },
   { name: 'DeepSeek API', billingModels: ['token'] },
   { name: 'Kimi CN', billingModels: ['token'] },
   { name: 'OpenAI API', billingModels: ['plan', 'token'] },
@@ -31,6 +32,12 @@ const availableBillingModels = computed(() => {
   return p ? p.billingModels : []
 })
 
+// 该供应商是否需要填写 API 密钥
+const requiresApiKey = computed(() => {
+  const p = PROVIDERS.find(p => p.name === selectedProvider.value)
+  return p ? p.requiresApiKey !== false : true
+})
+
 // 选中供应商时重置计费模式
 function onProviderChange() {
   selectedBillingModel.value = ''
@@ -51,7 +58,7 @@ async function handleSave() {
     error.value = '请选择计费模式'
     return
   }
-  if (!apiKey.value.trim()) {
+  if (requiresApiKey.value && !apiKey.value.trim()) {
     error.value = '请输入 API 密钥'
     return
   }
@@ -144,7 +151,7 @@ async function handleSave() {
         </div>
 
         <!-- API 密钥输入 -->
-        <div class="form-group">
+        <div class="form-group" v-if="requiresApiKey">
           <label class="form-label">API 密钥</label>
           <div class="password-wrapper">
             <input
@@ -168,6 +175,12 @@ async function handleSave() {
               </svg>
             </button>
           </div>
+        </div>
+
+        <!-- 无需 API 密钥的供应商 -->
+        <div class="form-group" v-else>
+          <label class="form-label">API 密钥</label>
+          <p class="form-hint">该供应商无需 API 密钥，可直接创建</p>
         </div>
 
         <!-- 错误提示 -->

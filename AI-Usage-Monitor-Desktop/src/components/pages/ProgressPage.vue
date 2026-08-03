@@ -26,7 +26,8 @@ function shortName(provider) {
   const map = {
     'DeepSeek API': 'DeepSeek', 'OpenAI API': 'OpenAI', 'Kimi CN': 'KIMI',
     'Aliyun API': '阿里云', '智谱 AI': 'GLM', 'Anthropic': 'Claude',
-    'Google AI': 'Gemini', 'Stability AI': 'SDXL', '百度文心': '文心', '科大讯飞': '讯飞'
+    'Google AI': 'Gemini', 'Stability AI': 'SDXL', '百度文心': '文心', '科大讯飞': '讯飞',
+    'XIAOMI MIMO': 'XIAOMI MIMO'
   }
   return map[provider] || provider
 }
@@ -35,7 +36,8 @@ function shortName(provider) {
 const mergedModelList = computed(() => {
   const balances = {
     ...(realtimeUsage.value.deepseekBalances || {}),
-    ...(realtimeUsage.value.kimiBalances || {})
+    ...(realtimeUsage.value.kimiBalances || {}),
+    ...(realtimeUsage.value.mimoBalances || {})
   }
   const fallbackBalance = realtimeUsage.value.deepseekBalance
   const savedVendors = realtimeUsage.value.vendors || []
@@ -44,11 +46,12 @@ const mergedModelList = computed(() => {
   return savedVendors.map(v => {
     const isDeepSeek = v.provider === 'DeepSeek API'
     const isKimi = v.provider === 'Kimi CN'
-    // 按 vendor ID 查找 balance，DeepSeek 额外支持全局 fallback
-    const balanceData = balances[v.id] || (isDeepSeek ? fallbackBalance : null)
+    const isMimo = v.provider === 'XIAOMI MIMO'
+    // 按 vendor ID 查找 balance，DeepSeek/MIMO 额外支持全局 fallback
+    const balanceData = balances[v.id] || (isDeepSeek ? fallbackBalance : null) || (isMimo ? realtimeUsage.value.mimoBalance : null)
     const hasBalance = !!balanceData
-    // DeepSeek/Kimi 供应商：Monitor 报告已登录时视为实时（即使 balance 尚未刷新）
-    const monitorLoggedIn = !!(isDeepSeek || isKimi) && !!monitorLoginStatus.value[v.id]
+    // DeepSeek/Kimi/MIMO 供应商：Monitor 报告已登录时视为实时（即使 balance 尚未刷新）
+    const monitorLoggedIn = !!(isDeepSeek || isKimi || isMimo) && !!monitorLoginStatus.value[v.id]
     const base = {
       id: v.id,
       name: v.customName || shortName(v.provider),
@@ -156,7 +159,7 @@ function usageClass(pct) {
 
 // ---------- 登录状态管理 ----------
 function isMonitorVendor(provider) {
-  return provider === 'DeepSeek API' || provider === 'Kimi CN'
+  return provider === 'DeepSeek API' || provider === 'Kimi CN' || provider === 'XIAOMI MIMO'
 }
 
 async function pollLoginStatus() {
@@ -271,6 +274,9 @@ onUnmounted(() => {
               <div v-else-if="m.provider === 'Kimi CN'" class="vendor-avatar vendor-avatar-img">
                 <img class="vendor-logo-img" src="/kimi.png" alt="Kimi" />
               </div>
+              <div v-else-if="m.provider === 'XIAOMI MIMO'" class="vendor-avatar vendor-avatar-img">
+                <img class="vendor-logo-img" src="/xiaomimimo.png" alt="XIAOMI MIMO" />
+              </div>
               <div v-else class="vendor-avatar" :style="{ backgroundColor: m.color }">
                 <span class="avatar-letter">{{ m.name.charAt(0) }}</span>
               </div>
@@ -279,6 +285,9 @@ onUnmounted(() => {
                   {{ m.name }}
                   <span v-if="m._stale" class="data-badge stale" title="使用缓存数据">缓存</span>
                   <span v-else-if="m._live" class="data-badge live" title="实时数据">实时</span>
+                  <span v-if="isMonitorVendor(m.provider) && !m._monitorLoggedIn" class="data-badge warning" :title="m._stale ? '登录已失效，请重新登录' : '未登录，点击供应商卡片前往登录'">
+                    {{ m._stale ? '登录失效' : '未登录' }}
+                  </span>
                 </h3>
                 <p class="vendor-provider">{{ m.provider }}</p>
               </div>
@@ -287,8 +296,8 @@ onUnmounted(() => {
             <!-- 订阅额度条 -->
             <div class="allowance-bar-wrap">
               <div class="allowance-bar-top">
-                <!-- DeepSeek 实时余额 -->
-                <template v-if="m.provider === 'DeepSeek API' && m._live">
+                <!-- DeepSeek / MIMO 实时余额（金额） -->
+                <template v-if="(m.provider === 'DeepSeek API' || m.provider === 'XIAOMI MIMO') && m._live">
                   <span class="allowance-label">账户余额</span>
                   <span class="allowance-value">
                     {{ formatMoney(m.allowance.remainingTokens, '¥') }} / {{ formatMoney(m.allowance.planTokensTotal, '¥') }}
@@ -309,17 +318,11 @@ onUnmounted(() => {
               </div>
               <div class="allowance-bar-bottom">
                 <span>已用 {{ m.allowance.usedPercent }}%</span>
-                <span v-if="m.provider === 'DeepSeek API' && m._live" class="allowance-status">
+                <span v-if="(m.provider === 'DeepSeek API' || m.provider === 'XIAOMI MIMO') && m._live" class="allowance-status">
                   {{ m._deepseekAvailable ? '正常' : '异常' }}
                 </span>
                 <span v-else>下次续费 {{ m.allowance.nextRenewal }}</span>
               </div>
-            </div>
-
-            <!-- DeepSeek / Kimi 未登录提示 -->
-            <div v-if="(m.provider === 'DeepSeek API' || m.provider === 'Kimi CN') && !m._monitorLoggedIn" class="deepseek-login-warning">
-              <span class="warning-icon">!</span>
-              <span>{{ m._stale ? '登录已失效，请重新登录' : '未登录' }} {{ m.provider === 'Kimi CN' ? 'Kimi' : 'DeepSeek' }}，点击供应商卡片前往登录</span>
             </div>
 
             <div class="card-meta">
@@ -358,6 +361,9 @@ onUnmounted(() => {
               <div v-else-if="m.provider === 'Kimi CN'" class="vendor-avatar vendor-avatar-img">
                 <img class="vendor-logo-img" src="/kimi.png" alt="Kimi" />
               </div>
+              <div v-else-if="m.provider === 'XIAOMI MIMO'" class="vendor-avatar vendor-avatar-img">
+                <img class="vendor-logo-img" src="/xiaomimimo.png" alt="XIAOMI MIMO" />
+              </div>
               <div v-else class="vendor-avatar" :style="{ backgroundColor: m.color }">
                 <span class="avatar-letter">{{ m.name.charAt(0) }}</span>
               </div>
@@ -366,6 +372,9 @@ onUnmounted(() => {
                   {{ m.name }}
                   <span v-if="m._stale" class="data-badge stale" title="使用缓存数据">缓存</span>
                   <span v-else-if="m._live" class="data-badge live" title="实时数据">实时</span>
+                  <span v-if="isMonitorVendor(m.provider) && !m._monitorLoggedIn" class="data-badge warning" :title="m._stale ? '登录已失效，请重新登录' : '未登录，点击供应商卡片前往登录'">
+                    {{ m._stale ? '登录失效' : '未登录' }}
+                  </span>
                 </h3>
                 <p class="vendor-provider">{{ m.provider }}</p>
               </div>
@@ -389,12 +398,6 @@ onUnmounted(() => {
                 <span>已用 {{ m.allowance.usedPercent }}%</span>
                 <span>{{ m.allowance.billingCycle }}</span>
               </div>
-            </div>
-
-            <!-- DeepSeek / Kimi 未登录提示 -->
-            <div v-if="(m.provider === 'DeepSeek API' || m.provider === 'Kimi CN') && !m._monitorLoggedIn" class="deepseek-login-warning">
-              <span class="warning-icon">!</span>
-              <span>{{ m._stale ? '登录已失效，请重新登录' : '未登录' }} {{ m.provider === 'Kimi CN' ? 'Kimi' : 'DeepSeek' }}，点击供应商卡片前往登录</span>
             </div>
 
             <div class="card-meta">
@@ -507,32 +510,8 @@ onUnmounted(() => {
 .spinner { width: 36px; height: 36px; border: 3px solid #e2e8f0; border-top-color: #4675ED; border-radius: 50%; animation: spin .8s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
-/* DeepSeek 登录警告 */
-.deepseek-login-warning {
-  display: flex;
-  align-items: center;
-  gap: 0.4rem;
-  padding: 0.375rem 0.625rem;
-  background: #fefce8;
-  border: 1px solid #fde68a;
-  border-radius: 6px;
-  font-size: 0.68rem;
-  color: #92400e;
-  margin-top: 0.25rem;
-}
-.warning-icon {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 16px;
-  height: 16px;
-  background: #f59e0b;
-  color: white;
-  border-radius: 50%;
-  font-size: 0.6rem;
-  font-weight: 700;
-  flex-shrink: 0;
-}
+/* 未登录警告徽标（内联于供应商名称旁） */
+.data-badge.warning { background: #fef2f2; color: #dc2626; }
 
 @media (max-width: 768px) {
   .toolbar { flex-direction: column; align-items: stretch; }

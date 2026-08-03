@@ -5,7 +5,8 @@ const https = require('https')
 const { spawn } = require('child_process')
 const { DeepSeekMonitor } = require('./deepseek-monitor')
 const { KimiMonitor } = require('./kimi-monitor')
-const { collectAll, recordTokenUsage, getTokenStats, resetDeepSeekBudget, flushTokenStats, loadTokenStats, recordHourlySnapshot, getPrevModelTokens } = require('./usage-collector')
+const MimoMonitor = require('./mimo-monitor')
+const { collectAll, recordTokenUsage, getTokenStats, resetDeepSeekBudget, resetMimoBudget, flushTokenStats, loadTokenStats, recordHourlySnapshot, getPrevModelTokens } = require('./usage-collector')
 const Scheduler = require('./scheduler')
 
 // ===== 语义化版本比较工具 =====
@@ -137,6 +138,7 @@ let mainWindow = null
 const scheduler = new Scheduler()
 const dsMonitors = new Map() // vendorId → DeepSeekMonitor
 const kmiMonitors = new Map() // vendorId → KimiMonitor
+const mimoMonitors = new Map() // vendorId → MimoMonitor
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -291,17 +293,16 @@ app.whenReady().then(() => {
   ipcMain.handle('get-vendors', () => readVendors())
 
   ipcMain.handle('save-vendor', (_event, vendorData) => {
-    // 数据验证
+    // 数据验证（部分供应商无需 API 密钥，如 XIAOMI MIMO）
     if (!vendorData.provider) throw new Error('供应商不能为空')
     if (!vendorData.billingModel) throw new Error('计费模式不能为空')
-    if (!vendorData.apiKey || !vendorData.apiKey.trim()) throw new Error('API 密钥不能为空')
 
     const vendors = readVendors()
     const newVendor = {
       id: Date.now().toString(36) + Math.random().toString(36).slice(2, 8),
       provider: vendorData.provider,
       billingModel: vendorData.billingModel,
-      apiKey: vendorData.apiKey.trim(),
+      apiKey: (vendorData.apiKey || '').trim(),
       createdAt: new Date().toISOString()
     }
     vendors.push(newVendor)
@@ -310,9 +311,9 @@ app.whenReady().then(() => {
     // 新增供应商后立即触发一次采集
     scheduler.collectBalance()
 
-    // 如果是 DeepSeek 或 Kimi 供应商，确保监听器已启动
+    // 如果是 DeepSeek / Kimi / XIAOMI MIMO 供应商，确保监听器已启动
     const prov = (newVendor.provider || '').toLowerCase()
-    if (prov.includes('deepseek') || prov.includes('kimi')) {
+    if (prov.includes('deepseek') || prov.includes('kimi') || prov.includes('mimo')) {
       ensureMonitors()
     }
 
@@ -392,18 +393,45 @@ app.whenReady().then(() => {
       }
     }
 
+    // 如果是 XIAOMI MIMO 供应商，清理对应的监控实例和浏览器 session
+    if ((deletedVendor.provider || '').toLowerCase().includes('mimo')) {
+      const monitor = mimoMonitors.get(vendorId)
+      if (monitor) {
+        monitor.stop()
+        mimoMonitors.delete(vendorId)
+        scheduler.unregisterMonitor(vendorId)
+        console.log(`[Main] 已停止并移除供应商 ${vendorId} 的 MIMO 监控实例`)
+      }
+      try {
+        const { session } = require('electron')
+        const ses = session.fromPartition(`persist:mimo-${vendorId}`)
+        await ses.clearStorageData({
+          storages: ['cookies', 'localstorage', 'caches', 'serviceworkers']
+        })
+        console.log(`[Main] 已清除供应商 ${vendorId} 的 MIMO session 数据`)
+      } catch (e) {
+        console.warn(`[Main] 清除 MIMO session 失败:`, e.message)
+      }
+    }
+
     // 立即更新缓存并推送前端，不等待异步采集
     try {
       const { readCache, writeCache } = require('./usage-collector')
       const cache = readCache()
       if (cache) {
         cache.vendors = vendors
+        // 删除单个供应商时，清理其对应的余额缓存
+        if (cache.deepseekBalances) delete cache.deepseekBalances[vendorId]
+        if (cache.kimiBalances) delete cache.kimiBalances[vendorId]
+        if (cache.mimoBalances) delete cache.mimoBalances[vendorId]
         // 所有供应商已删除时，清除缓存的余额数据，防止前端显示幽灵条目
         if (vendors.length === 0) {
           delete cache.deepseekBalance
           delete cache.deepseekBalances
           delete cache.kimiBalance
           delete cache.kimiBalances
+          delete cache.mimoBalance
+          delete cache.mimoBalances
         }
         writeCache(cache)
         mainWindow?.webContents.send('usage-data-updated', cache)
@@ -457,11 +485,12 @@ app.whenReady().then(() => {
     return vendors.some(v => (v.provider || '').toLowerCase().includes('deepseek'))
   }
 
-  // 为每个 DeepSeek vendor 创建独立的监控实例（隔离 session）
+  // 为每个 DeepSeek / Kimi / XIAOMI MIMO vendor 创建独立的监控实例（隔离 session）
   function ensureMonitors() {
     const vendors = readVendors()
     const deepseekVendors = vendors.filter(v => (v.provider || '').toLowerCase().includes('deepseek'))
     const kimiVendors = vendors.filter(v => (v.provider || '').toLowerCase().includes('kimi'))
+    const mimoVendors = vendors.filter(v => (v.provider || '').toLowerCase().includes('mimo'))
 
     // 启动缺失的 DeepSeek 监控
     for (const v of deepseekVendors) {
@@ -508,14 +537,39 @@ app.whenReady().then(() => {
         console.log(`[Main] 移除供应商 ${vendorId} 的 Kimi 监控实例`)
       }
     }
+
+    // 启动缺失的 MIMO 监控
+    for (const v of mimoVendors) {
+      if (!mimoMonitors.has(v.id)) {
+        const monitor = new MimoMonitor(v.id)
+        monitor.onLoginStatusChanged = broadcastLoginStatus
+        monitor.start(mimoMonitorCallback)
+        mimoMonitors.set(v.id, monitor)
+        scheduler.registerMonitor(v.id, monitor)
+        console.log(`[Main] 为供应商 ${v.customName || v.id} 创建 MIMO 监控实例`)
+        // 立即触发一次解析，不等待 scheduler 的10分钟轮询
+        setTimeout(() => monitor.refreshNow(), 2000)
+      }
+    }
+
+    // 停止已删除供应商的 MIMO 监控
+    for (const [vendorId, monitor] of mimoMonitors) {
+      if (!mimoVendors.find(v => v.id === vendorId)) {
+        monitor.stop()
+        mimoMonitors.delete(vendorId)
+        scheduler.unregisterMonitor(vendorId)
+        console.log(`[Main] 移除供应商 ${vendorId} 的 MIMO 监控实例`)
+      }
+    }
   }
 
   // 获取指定 vendorId 的监控实例，或获取任意一个
   function getMonitor(vendorId) {
     if (vendorId && dsMonitors.has(vendorId)) return dsMonitors.get(vendorId)
     if (vendorId && kmiMonitors.has(vendorId)) return kmiMonitors.get(vendorId)
+    if (vendorId && mimoMonitors.has(vendorId)) return mimoMonitors.get(vendorId)
     // fallback: 返回第一个
-    return dsMonitors.values().next().value || kmiMonitors.values().next().value || null
+    return dsMonitors.values().next().value || kmiMonitors.values().next().value || mimoMonitors.values().next().value || null
   }
 
   function getKimiMonitorLoginMap() {
@@ -682,6 +736,36 @@ app.whenReady().then(() => {
     }
   }
 
+  // MIMO 监听器数据回调：DOM/XPath 解析的余额数据 → 写入缓存并推送前端
+  const mimoMonitorCallback = (payload) => {
+    console.log(`[Main] MIMO 监听器收到数据: ${payload.type} from ${payload.url}`)
+
+    const data = payload.data
+
+    // mimo-balance: XPath 解析的账户余额
+    if (payload.type === 'mimo-balance' && data && typeof data.balance === 'number') {
+      try {
+        const { readCache, writeCache, computeMimoBalance } = require('./usage-collector')
+        const cache = readCache() || { vendors: [] }
+        const balance = computeMimoBalance(data, cache, payload.vendorId)
+        if (!cache.mimoBalances) cache.mimoBalances = {}
+        cache.mimoBalances[payload.vendorId] = balance
+        // 兼容：全局 mimoBalance 取第一个 vendor 的 balance
+        const firstMimo = Object.values(cache.mimoBalances)[0]
+        cache.mimoBalance = firstMimo || null
+        cache.lastCollect = new Date().toISOString()
+        writeCache(cache)
+        mainWindow?.webContents.send('usage-data-updated', cache)
+        console.log(`[Main] MIMO 余额已更新: vendor=${payload.vendorId} remaining=${balance.remaining} spent=${balance.spent}`)
+      } catch (e) {
+        console.error('[Main] MIMO 余额写入失败:', e.message)
+      }
+      return
+    }
+
+    console.log('[Main] 未处理的 MIMO 数据格式:', payload.type)
+  }
+
   ensureMonitors()
 
   // 暴露监听器状态查询（支持 vendorId 参数路由到对应监控实例）
@@ -728,6 +812,20 @@ app.whenReady().then(() => {
     try {
       const data = await resetDeepSeekBudget()
       mainWindow?.webContents.send('usage-data-updated', data)
+      return { success: true, data }
+    } catch (e) {
+      return { success: false, error: e.message }
+    }
+  })
+
+  // 重置 XIAOMI MIMO 累计预算
+  ipcMain.handle('reset-mimo-budget', async (_event, vendorId) => {
+    try {
+      const data = await resetMimoBudget(vendorId)
+      mainWindow?.webContents.send('usage-data-updated', data)
+      // 初始化后触发一次实时刷新，让后续数据尽快更新
+      const monitor = mimoMonitors.get(vendorId)
+      if (monitor) setTimeout(() => monitor.refreshNow(), 300)
       return { success: true, data }
     } catch (e) {
       return { success: false, error: e.message }
@@ -972,6 +1070,8 @@ app.on('window-all-closed', () => {
   dsMonitors.clear()
   for (const [, monitor] of kmiMonitors) monitor.stop()
   kmiMonitors.clear()
+  for (const [, monitor] of mimoMonitors) monitor.stop()
+  mimoMonitors.clear()
   if (process.platform !== 'darwin') app.quit()
 })
 
@@ -984,7 +1084,8 @@ app.on('before-quit', (event) => {
   scheduler.stop()
   const stopPromises = [
     ...[...dsMonitors.values()].map(m => m.stop()),
-    ...[...kmiMonitors.values()].map(m => m.stop())
+    ...[...kmiMonitors.values()].map(m => m.stop()),
+    ...[...mimoMonitors.values()].map(m => m.stop())
   ]
   Promise.all(stopPromises).then(() => {
     flushTokenStats()

@@ -35,14 +35,18 @@ onMounted(async () => {
       if (data) {
         const found = data.vendors?.find(v => v.id === route.params.id)
         vendor.value = found || null
-        // 按 vendor ID 查找 balance（DeepSeek / Kimi），找不到则用全局 fallback
-        const balances = { ...(data.deepseekBalances || {}), ...(data.kimiBalances || {}) }
-        balance.value = balances[route.params.id] || data.deepseekBalance || data.kimiBalance || null
+        // 按 vendor ID 查找 balance；全局 fallback 仅对 DeepSeek / Kimi / MIMO 生效，避免其他供应商继承错误数据
+        const balances = { ...(data.deepseekBalances || {}), ...(data.kimiBalances || {}), ...(data.mimoBalances || {}) }
+        balance.value = balances[route.params.id]
+          || (isDeepSeek.value ? data.deepseekBalance : null)
+          || (isKimi.value ? data.kimiBalance : null)
+          || (isMimo.value ? data.mimoBalance : null)
+          || null
       }
     } catch { /* 忽略 */ }
 
-    // 查询 DeepSeek/Kimi Monitor 实际登录状态
-    if ((isDeepSeek.value || vendorType.value === 'Moonshot') && window.electronAPI.getMonitorLoginStatus) {
+    // 查询 DeepSeek/Kimi/MIMO Monitor 实际登录状态
+    if ((isDeepSeek.value || vendorType.value === 'Moonshot' || isMimo.value) && window.electronAPI.getMonitorLoginStatus) {
       try {
         const loggedIn = await window.electronAPI.getMonitorLoginStatus(vendor.value?.id)
         monitorLoggedIn.value = !!loggedIn
@@ -60,7 +64,7 @@ onMounted(async () => {
 
     // 定期轮询登录状态（作为事件推送的补充，防止遗漏）
     loginStatusPollTimer = setInterval(async () => {
-      if (!isDeepSeek.value && vendorType.value !== 'Moonshot') return
+      if (!isDeepSeek.value && vendorType.value !== 'Moonshot' && !isMimo.value) return
       if (!window.electronAPI?.getMonitorLoginStatus || !vendor.value?.id) return
       try {
         const loggedIn = await window.electronAPI.getMonitorLoginStatus(vendor.value.id)
@@ -78,8 +82,11 @@ onMounted(async () => {
         }
         vendor.value = found
       }
-      const balances = { ...(data.deepseekBalances || {}), ...(data.kimiBalances || {}) }
-      const newBalance = balances[route.params.id] || data.deepseekBalance || data.kimiBalance
+      const balances = { ...(data.deepseekBalances || {}), ...(data.kimiBalances || {}), ...(data.mimoBalances || {}) }
+      const newBalance = balances[route.params.id]
+        || (isDeepSeek.value ? data.deepseekBalance : null)
+        || (isKimi.value ? data.kimiBalance : null)
+        || (isMimo.value ? data.mimoBalance : null)
       if (newBalance) balance.value = newBalance
     })
   }
@@ -96,10 +103,12 @@ onUnmounted(() => {
 const goBack = () => router.push({ name: 'progress' })
 
 const isDeepSeek = computed(() => vendor.value?.provider === 'DeepSeek API')
+const isKimi = computed(() => vendor.value?.provider === 'Kimi CN')
+const isMimo = computed(() => vendor.value?.provider === 'XIAOMI MIMO')
 const isPlan = computed(() => vendor.value?.billingModel === 'plan')
 const isToken = computed(() => vendor.value?.billingModel === 'token')
 const hasBalance = computed(() => !!balance.value)
-const isLive = computed(() => isDeepSeek.value ? monitorLoggedIn.value : (hasBalance.value && !balance.value?._stale))
+const isLive = computed(() => (isDeepSeek.value || isMimo.value) ? monitorLoggedIn.value : (hasBalance.value && !balance.value?._stale))
 const isLoggedIn = computed(() => isDeepSeek.value ? monitorLoggedIn.value : hasBalance.value)
 const displayName = computed(() => vendor.value?.customName || shortName(vendor.value?.provider || ''))
 
@@ -144,7 +153,8 @@ function shortName(provider) {
   const map = {
     'DeepSeek API': 'DeepSeek', 'OpenAI API': 'OpenAI', 'Kimi CN': 'Kimi CN',
     'Aliyun API': '阿里云', '智谱 AI': 'GLM', 'Anthropic': 'Claude',
-    'Google AI': 'Gemini', 'Stability AI': 'SDXL', '百度文心': '文心', '科大讯飞': '讯飞'
+    'Google AI': 'Gemini', 'Stability AI': 'SDXL', '百度文心': '文心', '科大讯飞': '讯飞',
+    'XIAOMI MIMO': 'XIAOMI MIMO'
   }
   return map[provider] || provider
 }
@@ -212,7 +222,7 @@ function startLoginPoll() {
       stopLoginPoll()
       return
     }
-    if (!isDeepSeek.value || !window.electronAPI?.getMonitorLoginStatus) return
+    if ((!isDeepSeek.value && !isMimo.value) || !window.electronAPI?.getMonitorLoginStatus) return
     try {
       const loggedIn = await window.electronAPI.getMonitorLoginStatus(vendor.value?.id)
       if (loggedIn) {
@@ -234,10 +244,18 @@ async function resetBudget() {
   if (resetting.value) return
   resetting.value = true
   try {
-    const result = await window.electronAPI.resetDeepSeekBudget()
+    let result
+    if (isMimo.value) {
+      result = await window.electronAPI.resetMimoBudget(vendor.value?.id)
+    } else {
+      result = await window.electronAPI.resetDeepSeekBudget()
+    }
     if (result.success) {
       // usage-data-updated 订阅会自动更新 balance
-      if (result.data?.deepseekBalance) {
+      const id = vendor.value?.id
+      if (result.data?.mimoBalances?.[id]) {
+        balance.value = result.data.mimoBalances[id]
+      } else if (result.data?.deepseekBalance) {
         balance.value = result.data.deepseekBalance
       }
     } else {
@@ -277,7 +295,7 @@ async function resetBudget() {
         </button>
         <div class="topbar-right">
           <button
-            v-if="isDeepSeek || vendorType === 'Moonshot'"
+            v-if="isDeepSeek || vendorType === 'Moonshot' || isMimo"
             class="login-deepseek-btn"
             @click="loginDeepSeek"
             :disabled="loginLoading"
@@ -285,7 +303,7 @@ async function resetBudget() {
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/><polyline points="10 17 15 12 10 7"/><line x1="15" y1="12" x2="3" y2="12"/>
             </svg>
-            {{ loginLoading ? '打开中...' : (isLoggedIn ? '更换账户' : '登录 ' + (vendorType === 'Moonshot' ? 'Kimi' : 'DeepSeek')) }}
+            {{ loginLoading ? '打开中...' : (isLoggedIn ? '更换账户' : '登录 ' + (vendorType === 'Moonshot' ? 'Kimi' : isMimo ? 'MIMO' : 'DeepSeek')) }}
           </button>
           <button class="delete-btn danger-btn" @click="showDeleteConfirm = true">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -298,12 +316,15 @@ async function resetBudget() {
 
       <!-- 厂商头部 -->
       <div class="vendor-header">
-        <div class="vendor-avatar" :style="(vendorType === 'DeepSeek' || vendorType === 'Moonshot') ? {} : { backgroundColor: modelColor }">
+        <div class="vendor-avatar" :style="(vendorType === 'DeepSeek' || vendorType === 'Moonshot' || vendor.provider === 'XIAOMI MIMO') ? {} : { backgroundColor: modelColor }">
           <template v-if="vendorType === 'DeepSeek'">
             <img src="/deepseek.png" alt="DeepSeek" style="width: 52px; height: 52px; object-fit: contain;" />
           </template>
           <template v-else-if="vendorType === 'Moonshot'">
             <img src="/kimi.png" alt="Kimi" style="width: 52px; height: 52px; object-fit: contain;" />
+          </template>
+          <template v-else-if="vendor.provider === 'XIAOMI MIMO'">
+            <img src="/xiaomimimo.png" alt="XIAOMI MIMO" style="width: 52px; height: 52px; object-fit: contain;" />
           </template>
           <template v-else-if="vendorType === 'OpenAI'">
             <svg width="28" height="28" viewBox="0 0 24 24" fill="none"><path d="M12 2a4 4 0 014 4v4a4 4 0 01-4 4 4 4 0 01-4-4V6a4 4 0 014-4z" fill="white" opacity="0.6"/><path d="M12 10a4 4 0 014 4v4a4 4 0 01-4 4 4 4 0 01-4-4v-4a4 4 0 014-4z" fill="white"/></svg>
@@ -388,11 +409,11 @@ async function resetBudget() {
             <span class="hf-value">{{ formatMoney(allowanceData.spent, allowanceData.currency) }}</span>
           </div>
           <div class="hero-foot-item">
-            <span class="hf-label">{{ isDeepSeek ? '赠送余额' : '代金券' }}</span>
-            <span class="hf-value">{{ formatMoney(isDeepSeek ? (balance?.granted_balance || 0) : (balance?.voucher_balance || 0), allowanceData.currency) }}</span>
+            <span class="hf-label">{{ isDeepSeek ? '赠送余额' : (isMimo ? '累计充值' : '代金券') }}</span>
+            <span class="hf-value">{{ formatMoney(isDeepSeek ? (balance?.granted_balance || 0) : (isMimo ? (balance?.totalBudget || 0) : (balance?.voucher_balance || 0)), allowanceData.currency) }}</span>
           </div>
           <button
-            v-if="isDeepSeek"
+            v-if="isDeepSeek || isMimo"
             class="reset-btn"
             :class="{ loading: resetting }"
             :disabled="resetting"

@@ -41,6 +41,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // ---------- 重置 DeepSeek 累计充值 ----------
   resetDeepSeekBudget: () => ipcRenderer.invoke('reset-deepseek-budget'),
 
+  // ---------- 重置 XIAOMI MIMO 累计预算 ----------
+  resetMimoBudget: (vendorId) => ipcRenderer.invoke('reset-mimo-budget', vendorId),
+
   // ---------- DeepSeek 用量页面监听器（支持 vendorId 隔离多账号） ----------
   getMonitorStatus: (vendorId) => ipcRenderer.invoke('get-monitor-status', vendorId),
   getMonitorLoginStatus: (vendorId) => ipcRenderer.invoke('get-monitor-login-status', vendorId),

@@ -47,6 +47,7 @@ async function manualRefresh() {
 const vendors = ref([])
 const balance = ref(null)
 const kimiBalances = ref({})
+const mimoBalances = ref({})
 
 // 4. 模型颜色映射（所有供应商的模型统一管理）
 const MODEL_COLORS = {
@@ -90,6 +91,7 @@ function getVendorName(model) {
   const lower = model.toLowerCase()
   if (lower.startsWith('deepseek')) return 'DeepSeek'
   if (lower.startsWith('kimi') || lower.startsWith('moonshot')) return 'Kimi'
+  if (lower.includes('mimo') || lower.includes('xiaomi')) return 'MIMO'
   return ''
 }
 
@@ -359,10 +361,11 @@ const modelUsageAndQuotas = computed(() => {
     const providerShort = vendorName.replace(/\s*API$/i, '').trim() || vendorName
     const displayName = v.customName || providerShort
 
-    // 使用 balance 数据（DeepSeek 用全局余额，Kimi 按 vendorId 取余额）
+    // 使用 balance 数据（DeepSeek 用全局余额，Kimi/MIMO 按 vendorId 取余额）
     const isDeepSeek = vendorName.toLowerCase().includes('deepseek')
     const isKimi = vendorName.toLowerCase().includes('kimi')
-    const vendorBal = isDeepSeek ? bal : (isKimi ? (kimiBalances.value[v.id] || null) : null)
+    const isMimo = vendorName.toLowerCase().includes('mimo')
+    const vendorBal = isDeepSeek ? bal : (isKimi ? (kimiBalances.value[v.id] || null) : (isMimo ? (mimoBalances.value[v.id] || null) : null))
     const isCurrentVendor = !!vendorBal
     const budget = isCurrentVendor ? (vendorBal.totalBudget || 0) : 0
     const remaining = isCurrentVendor ? (vendorBal.remaining || 0) : 0
@@ -557,6 +560,7 @@ onMounted(async () => {
         vendors.value = usageData.vendors || []
         balance.value = usageData.deepseekBalance || null
         kimiBalances.value = usageData.kimiBalances || {}
+        mimoBalances.value = usageData.mimoBalances || {}
       }
     } catch (e) {
       console.warn('[Workbench] 加载用量数据失败:', e.message)
@@ -576,6 +580,7 @@ onMounted(async () => {
       if (data.vendors) vendors.value = data.vendors
       balance.value = data.deepseekBalance || null
       kimiBalances.value = data.kimiBalances || {}
+      mimoBalances.value = data.mimoBalances || {}
     })
   } else {
     tokenStatsError.value = '运行环境不支持（非 Electron）'
@@ -648,6 +653,7 @@ onUnmounted(() => {
                   <span class="top3-rank" :class="'rank-' + (i + 1)">{{ i + 1 }}</span>
                   <img v-if="model.vendor === 'DeepSeek'" src="/deepseek.png" class="top3-vendor-icon" />
                   <img v-else-if="model.vendor === 'Kimi'" src="/kimi.png" class="top3-vendor-icon" />
+                  <img v-else-if="model.vendor === 'MIMO'" src="/xiaomimimo.png" class="top3-vendor-icon" />
                   <span class="top3-name">{{ model.displayName }}</span>
                   <span class="top3-value"><CountUpText :value="model.usedTokens" :format="formatTokenDisplay" /></span>
                 </div>
@@ -676,6 +682,7 @@ onUnmounted(() => {
                 <div class="model-meta">
                   <span v-if="model.provider?.toLowerCase().includes('deepseek')" class="model-logo"><img class="vendor-logo-img" src="/deepseek.png" alt="DeepSeek" /></span>
                   <span v-else-if="model.provider?.toLowerCase().includes('kimi')" class="model-logo"><img class="vendor-logo-img" src="/kimi.png" alt="Kimi" /></span>
+                  <span v-else-if="model.provider?.toLowerCase().includes('mimo')" class="model-logo"><img class="vendor-logo-img" src="/xiaomimimo.png" alt="XIAOMI MIMO" /></span>
                   <span v-else class="model-badge" :class="model.type?.toLowerCase() + '-badge' || 'default-badge'">{{ model.type || 'API' }}</span>
                   <span class="model-name-text">{{ model.name }}</span>
                   <span v-if="model._live" class="live-badge">实时</span>

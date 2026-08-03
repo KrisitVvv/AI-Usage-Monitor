@@ -807,6 +807,45 @@ function computeKimiBalance(raw, prevCache, vendorId) {
 }
 
 // ---------- 累计充值追踪 ----------
+/**
+ * 计算 XIAOMI MIMO 余额（无累计充值字段，与 Kimi 一致采用余额变化追踪）：
+ * - 首次采集：以当前余额作为累计预算
+ * - 之后余额上涨（充值）→ 差值计入累计预算
+ * - 余额下降（消费）→ spent 自动 = 累计预算 - 当前余额
+ */
+function computeMimoBalance(raw, prevCache, vendorId) {
+  const balances = prevCache?.mimoBalances || {}
+  const prev = vendorId ? (balances[vendorId] || null) : null
+  const prevRemaining = prev?.remaining ?? null
+  const prevBudget = prev?.totalBudget || 0
+
+  const remaining = raw.balance
+
+  let totalBudget = prevBudget
+  if (prevRemaining !== null) {
+    if (remaining > prevRemaining) {
+      // 检测到充值：累加差额
+      totalBudget += (remaining - prevRemaining)
+    }
+  } else {
+    // 首次运行：以当前余额为基准
+    totalBudget = remaining
+  }
+
+  const spent = Math.max(0, totalBudget - remaining)
+  const usedPercent = totalBudget > 0 ? Math.round((spent / totalBudget) * 100) : 0
+
+  return {
+    totalBudget,        // 累计预算（充值追踪）
+    remaining,           // 当前可用余额
+    spent,               // 已消费
+    usedPercent,
+    currency: raw.currency || 'CNY',
+    is_available: remaining > 0,
+    fetchedAt: raw.fetchedAt || new Date().toISOString()
+  }
+}
+
 function computeBalance(raw, prevCache, vendorId) {
   const balances = prevCache?.deepseekBalances || {}
   const prev = vendorId ? (balances[vendorId] || prevCache?.deepseekBalance || null) : (prevCache?.deepseekBalance || null)
@@ -891,6 +930,49 @@ async function resetDeepSeekBudget() {
   return cacheData
 }
 
+/**
+ * 重置 XIAOMI MIMO 累计预算为当前余额
+ * 效果：spent = 0，进度条归零，后续充值继续累加（与 DeepSeek 初始化逻辑一致）
+ * MIMO 无 API，余额来自 Monitor 解析结果（mimoBalances 缓存）
+ */
+async function resetMimoBudget(vendorId) {
+  const vendorsPath = getUserDataPath(VENDORS_FILE_NAME)
+  if (!fs.existsSync(vendorsPath)) throw new Error('未找到供应商配置')
+
+  let vendors = []
+  try { vendors = JSON.parse(fs.readFileSync(vendorsPath, 'utf-8')) } catch { throw new Error('供应商配置文件损坏') }
+
+  const mimoVendor = vendors.find(v => v.id === vendorId && (v.provider || '').toLowerCase().includes('mimo'))
+  if (!mimoVendor) throw new Error('未找到 XIAOMI MIMO 配置')
+
+  const cache = readCache() || { vendors: [] }
+  const balance = cache.mimoBalances?.[vendorId] || null
+  if (!balance || typeof balance.remaining !== 'number') {
+    throw new Error('暂无余额数据，请先登录 MIMO 账户获取余额后再初始化')
+  }
+
+  // 构造新的余额：totalBudget = 当前余额 → 已消费 = 0
+  const newBalance = {
+    totalBudget: balance.remaining,
+    remaining: balance.remaining,
+    spent: 0,
+    usedPercent: 0,
+    currency: balance.currency || 'CNY',
+    is_available: balance.is_available,
+    fetchedAt: new Date().toISOString(),
+    _reset: true
+  }
+
+  if (!cache.mimoBalances) cache.mimoBalances = {}
+  cache.mimoBalances[vendorId] = newBalance
+  cache.mimoBalance = Object.values(cache.mimoBalances)[0] || null
+  cache.lastCollect = new Date().toISOString()
+  writeCache(cache)
+
+  console.log(`[Reset] MIMO 余额已初始化: vendor=${vendorId}, totalBudget=${newBalance.remaining}, spent=0`)
+  return cache
+}
+
 // ---------- 核心采集逻辑 ----------
 async function collectAll(kimiMonitorLoggedInMap = {}) {
   const vendorsPath = getUserDataPath(VENDORS_FILE_NAME)
@@ -902,7 +984,9 @@ async function collectAll(kimiMonitorLoggedInMap = {}) {
     deepseekBalance: null,
     deepseekBalances: {},
     kimiBalance: null,
-    kimiBalances: {}
+    kimiBalances: {},
+    mimoBalance: null,
+    mimoBalances: {}
   })
 
   if (!fs.existsSync(vendorsPath)) {
@@ -964,7 +1048,15 @@ async function collectAll(kimiMonitorLoggedInMap = {}) {
   }
 
   if (deepseekVendors.length === 0 && kimiVendors.length === 0) {
-    return emptyResult(vendors, ['未找到可采集余额的供应商配置，请先添加供应商'])
+    // 没有任何需 API 采集余额的供应商：若已存在供应商（如无 API 密钥的 XIAOMI MIMO），不视为错误
+    if (vendors.length === 0) {
+      return emptyResult([], ['未找到可采集余额的供应商配置，请先添加供应商'])
+    }
+    const result = emptyResult(vendors)
+    // 保留 MIMO Monitor 写入的余额数据（该供应商无 API，仅通过 Monitor 采集）
+    result.mimoBalance = prevCache?.mimoBalance || null
+    result.mimoBalances = prevCache?.mimoBalances || {}
+    return result
   }
 
   // 兼容：deepseekBalance / kimiBalance 取第一个 vendor 的 balance
@@ -979,6 +1071,9 @@ async function collectAll(kimiMonitorLoggedInMap = {}) {
     deepseekBalances,
     kimiBalance: firstKimiBalance,
     kimiBalances,
+    // 透传 MIMO Monitor 写入的余额数据，避免被本轮 API 采集覆盖
+    mimoBalance: prevCache?.mimoBalance || null,
+    mimoBalances: prevCache?.mimoBalances || {},
     _raw: firstRaw
   }
   writeCache(cacheData)
@@ -986,4 +1081,4 @@ async function collectAll(kimiMonitorLoggedInMap = {}) {
   return cacheData
 }
 
-module.exports = { collectAll, readCache, writeCache, recordTokenUsage, getTokenStats, resetDeepSeekBudget, flushTokenStats, loadTokenStats, recordHourlySnapshot, getPrevModelTokens, getTodayHourlyDeltas, getDailySummary }
+module.exports = { collectAll, readCache, writeCache, recordTokenUsage, getTokenStats, resetDeepSeekBudget, resetMimoBudget, flushTokenStats, loadTokenStats, recordHourlySnapshot, getPrevModelTokens, getTodayHourlyDeltas, getDailySummary, computeMimoBalance }
