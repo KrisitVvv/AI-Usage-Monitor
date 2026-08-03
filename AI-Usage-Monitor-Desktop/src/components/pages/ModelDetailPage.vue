@@ -15,6 +15,8 @@ const loginLoading = ref(false)
 const renaming = ref(false)
 const monitorLoggedIn = ref(false)
 let loginPollTimer = null
+let loginStatusUnsubscribe = null
+let loginStatusPollTimer = null
 const renameValue = ref('')
 let unsubscribe = null
 
@@ -39,13 +41,32 @@ onMounted(async () => {
       }
     } catch { /* 忽略 */ }
 
-    // 查询 DeepSeek Monitor 实际登录状态
-    if (isDeepSeek.value && window.electronAPI.getMonitorLoginStatus) {
+    // 查询 DeepSeek/Kimi Monitor 实际登录状态
+    if ((isDeepSeek.value || vendorType.value === 'Moonshot') && window.electronAPI.getMonitorLoginStatus) {
       try {
         const loggedIn = await window.electronAPI.getMonitorLoginStatus(vendor.value?.id)
         monitorLoggedIn.value = !!loggedIn
       } catch { /* 忽略 */ }
     }
+
+    // 订阅登录状态变更事件（实时更新）
+    if (window.electronAPI.onMonitorLoginStatusChanged) {
+      loginStatusUnsubscribe = window.electronAPI.onMonitorLoginStatusChanged(({ vendorId, loggedIn }) => {
+        if (vendorId === vendor.value?.id) {
+          monitorLoggedIn.value = loggedIn
+        }
+      })
+    }
+
+    // 定期轮询登录状态（作为事件推送的补充，防止遗漏）
+    loginStatusPollTimer = setInterval(async () => {
+      if (!isDeepSeek.value && vendorType.value !== 'Moonshot') return
+      if (!window.electronAPI?.getMonitorLoginStatus || !vendor.value?.id) return
+      try {
+        const loggedIn = await window.electronAPI.getMonitorLoginStatus(vendor.value.id)
+        monitorLoggedIn.value = !!loggedIn
+      } catch { /* 忽略 */ }
+    }, 15000)
 
     // 订阅后续更新
     unsubscribe = window.electronAPI.onUsageDataUpdated((data) => {
@@ -67,6 +88,8 @@ onMounted(async () => {
 
 onUnmounted(() => {
   stopLoginPoll()
+  if (typeof loginStatusUnsubscribe === 'function') loginStatusUnsubscribe()
+  if (loginStatusPollTimer) { clearInterval(loginStatusPollTimer); loginStatusPollTimer = null }
   if (typeof unsubscribe === 'function') unsubscribe()
 })
 
@@ -254,7 +277,7 @@ async function resetBudget() {
         </button>
         <div class="topbar-right">
           <button
-            v-if="isDeepSeek"
+            v-if="isDeepSeek || vendorType === 'Moonshot'"
             class="login-deepseek-btn"
             @click="loginDeepSeek"
             :disabled="loginLoading"
@@ -262,7 +285,7 @@ async function resetBudget() {
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/><polyline points="10 17 15 12 10 7"/><line x1="15" y1="12" x2="3" y2="12"/>
             </svg>
-            {{ loginLoading ? '打开中...' : (isLoggedIn ? '更换账户' : '登录 DeepSeek') }}
+            {{ loginLoading ? '打开中...' : (isLoggedIn ? '更换账户' : '登录 ' + (vendorType === 'Moonshot' ? 'Kimi' : 'DeepSeek')) }}
           </button>
           <button class="delete-btn danger-btn" @click="showDeleteConfirm = true">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">

@@ -8,6 +8,10 @@ const loading = ref(true)
 const showAddModal = ref(false)
 const realtimeUsage = ref({ vendors: [], errors: [], lastCollect: null, deepseekBalance: null })
 let unsubscribe = null
+let loginStatusUnsubscribe = null
+let loginStatusPollTimer = null
+// DeepSeek/Kimi Monitor 登录状态（vendorId → boolean）
+const monitorLoginStatus = ref({})
 
 // ---------- 工具函数 ----------
 const PALETTE = ['#3b82f6', '#10b981', '#f59e0b', '#8b5cf6', '#ef4444', '#ec4899', '#06b6d4', '#f97316', '#84cc16', '#6366f1']
@@ -39,18 +43,22 @@ const mergedModelList = computed(() => {
 
   return savedVendors.map(v => {
     const isDeepSeek = v.provider === 'DeepSeek API'
+    const isKimi = v.provider === 'Kimi CN'
     // 按 vendor ID 查找 balance，DeepSeek 额外支持全局 fallback
     const balanceData = balances[v.id] || (isDeepSeek ? fallbackBalance : null)
     const hasBalance = !!balanceData
+    // DeepSeek/Kimi 供应商：Monitor 报告已登录时视为实时（即使 balance 尚未刷新）
+    const monitorLoggedIn = !!(isDeepSeek || isKimi) && !!monitorLoginStatus.value[v.id]
     const base = {
       id: v.id,
       name: v.customName || shortName(v.provider),
       provider: v.provider,
       billingModel: v.billingModel,
       color: vendorColor(v.provider),
-      _live: hasBalance && !balanceData._stale,
-      _stale: hasBalance && !!balanceData._stale,
-      _deepseekAvailable: hasBalance ? balanceData.is_available : false
+      _live: monitorLoggedIn || (hasBalance && !balanceData._stale),
+      _stale: !monitorLoggedIn && hasBalance && !!balanceData._stale,
+      _deepseekAvailable: hasBalance ? balanceData.is_available : false,
+      _monitorLoggedIn: monitorLoggedIn
     }
 
     if (hasBalance) {
@@ -146,6 +154,27 @@ function usageClass(pct) {
   return 'safe'
 }
 
+// ---------- 登录状态管理 ----------
+function isMonitorVendor(provider) {
+  return provider === 'DeepSeek API' || provider === 'Kimi CN'
+}
+
+async function pollLoginStatus() {
+  if (!window.electronAPI?.getMonitorLoginStatus) return
+  const vendors = realtimeUsage.value.vendors || []
+  const needsCheck = vendors.filter(v => isMonitorVendor(v.provider))
+  if (!needsCheck.length) return
+
+  const newStatus = { ...monitorLoginStatus.value }
+  for (const v of needsCheck) {
+    try {
+      const loggedIn = await window.electronAPI.getMonitorLoginStatus(v.id)
+      newStatus[v.id] = !!loggedIn
+    } catch { /* 忽略 */ }
+  }
+  monitorLoginStatus.value = newStatus
+}
+
 // ---------- 生命周期 ----------
 onMounted(async () => {
   if (window.electronAPI) {
@@ -155,13 +184,31 @@ onMounted(async () => {
     } catch { /* 忽略 */ }
     // 处理来自详情页的重命名通知（在获取数据后、订阅前）
     applyPendingRenames()
+
+    // 首次查询所有 DeepSeek/Kimi 供应商的登录状态
+    await pollLoginStatus()
+
+    // 订阅登录状态变更事件（实时更新）
+    if (window.electronAPI.onMonitorLoginStatusChanged) {
+      loginStatusUnsubscribe = window.electronAPI.onMonitorLoginStatusChanged(({ vendorId, loggedIn }) => {
+        monitorLoginStatus.value = { ...monitorLoginStatus.value, [vendorId]: loggedIn }
+      })
+    }
+
+    // 定期轮询登录状态（作为事件推送的补充）
+    loginStatusPollTimer = setInterval(pollLoginStatus, 15000)
+
     unsubscribe = window.electronAPI.onUsageDataUpdated((data) => {
       realtimeUsage.value = data
     })
   }
   setTimeout(() => { loading.value = false }, 600)
 })
-onUnmounted(() => { if (typeof unsubscribe === 'function') unsubscribe() })
+onUnmounted(() => {
+  if (typeof loginStatusUnsubscribe === 'function') loginStatusUnsubscribe()
+  if (loginStatusPollTimer) { clearInterval(loginStatusPollTimer); loginStatusPollTimer = null }
+  if (typeof unsubscribe === 'function') unsubscribe()
+})
 </script>
 
 <template>
@@ -269,10 +316,10 @@ onUnmounted(() => { if (typeof unsubscribe === 'function') unsubscribe() })
               </div>
             </div>
 
-            <!-- DeepSeek 未登录提示 -->
-            <div v-if="m.provider === 'DeepSeek API' && !m._live" class="deepseek-login-warning">
+            <!-- DeepSeek / Kimi 未登录提示 -->
+            <div v-if="(m.provider === 'DeepSeek API' || m.provider === 'Kimi CN') && !m._monitorLoggedIn" class="deepseek-login-warning">
               <span class="warning-icon">!</span>
-              <span>未登录 DeepSeek，点击供应商卡片前往登录</span>
+              <span>{{ m._stale ? '登录已失效，请重新登录' : '未登录' }} {{ m.provider === 'Kimi CN' ? 'Kimi' : 'DeepSeek' }}，点击供应商卡片前往登录</span>
             </div>
 
             <div class="card-meta">
@@ -344,10 +391,10 @@ onUnmounted(() => { if (typeof unsubscribe === 'function') unsubscribe() })
               </div>
             </div>
 
-            <!-- DeepSeek 未登录提示 -->
-            <div v-if="m.provider === 'DeepSeek API' && !m._live" class="deepseek-login-warning">
+            <!-- DeepSeek / Kimi 未登录提示 -->
+            <div v-if="(m.provider === 'DeepSeek API' || m.provider === 'Kimi CN') && !m._monitorLoggedIn" class="deepseek-login-warning">
               <span class="warning-icon">!</span>
-              <span>未登录 DeepSeek，点击供应商卡片前往登录</span>
+              <span>{{ m._stale ? '登录已失效，请重新登录' : '未登录' }} {{ m.provider === 'Kimi CN' ? 'Kimi' : 'DeepSeek' }}，点击供应商卡片前往登录</span>
             </div>
 
             <div class="card-meta">

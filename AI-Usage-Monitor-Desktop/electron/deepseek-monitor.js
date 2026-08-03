@@ -26,6 +26,7 @@ class DeepSeekMonitor {
       interceptedUrls: []
     }
     this.onDataCallback = null
+    this.onLoginStatusChanged = null
     this._navRetryCount = 0
     this._pageReady = false
   }
@@ -73,8 +74,10 @@ class DeepSeekMonitor {
       }
     })
 
-    this.monitorWindow.webContents.on('did-start-navigation', (e, url, isInPlace, isMainFrame) => {
-      if (isMainFrame && url.includes('platform.deepseek.com')) {
+    // dom-ready: DOM 已创建，可以在页面 JS 执行前注入拦截器
+    this.monitorWindow.webContents.on('dom-ready', () => {
+      const url = this.monitorWindow?.webContents?.getURL()
+      if (url && url.includes('platform.deepseek.com')) {
         this.injectInterceptor()
       }
     })
@@ -163,16 +166,28 @@ class DeepSeekMonitor {
     const isLogin = url.includes('/sign_in') || url.includes('/login') || url.includes('accounts.deepseek.com')
 
     if (isLogin) {
+      const wasLoggedIn = this.status.loggedIn
       this.status.loggedIn = false
       this.status.error = '未登录'
       this._navRetryCount = 0
       this._pageReady = false
+      if (wasLoggedIn && this.onLoginStatusChanged) {
+        this.onLoginStatusChanged(this.vendorId, false)
+      }
       console.log(`[DS-Monitor:${this.vendorId}] 未登录，等待用户手动触发`)
       return
     }
 
+    const wasLoggedIn = this.status.loggedIn
     this.status.loggedIn = true
     this.status.error = null
+    if (!wasLoggedIn && this.onLoginStatusChanged) {
+      this.onLoginStatusChanged(this.vendorId, true)
+    }
+    // 登录成功后自动隐藏窗口，防止登录界面持续显示
+    if (this.monitorWindow && !this.monitorWindow.isDestroyed()) {
+      this.monitorWindow.hide()
+    }
 
     if (!url.includes('/usage')) {
       if (this._navRetryCount >= 5) { this._navRetryCount = 0; return }
@@ -184,6 +199,9 @@ class DeepSeekMonitor {
 
     this._navRetryCount = 0
     this.monitorWindow.hide()
+
+    // 确保拦截器已注入（dom-ready 可能未触发或注入失败时的兜底）
+    this.injectInterceptor()
 
     await this.sleep(5000)
     await this.readInterceptedData()

@@ -3,6 +3,8 @@ const path = require('path')
 const fs = require('fs')
 const https = require('https')
 const { spawn } = require('child_process')
+const { DeepSeekMonitor } = require('./deepseek-monitor')
+const { KimiMonitor } = require('./kimi-monitor')
 const { collectAll, recordTokenUsage, getTokenStats, resetDeepSeekBudget, flushTokenStats, loadTokenStats, recordHourlySnapshot, getPrevModelTokens } = require('./usage-collector')
 const Scheduler = require('./scheduler')
 
@@ -134,6 +136,7 @@ function downloadFileWithProgress(url, savePath, onProgress, redirects = 0) {
 let mainWindow = null
 const scheduler = new Scheduler()
 const dsMonitors = new Map() // vendorId → DeepSeekMonitor
+const kmiMonitors = new Map() // vendorId → KimiMonitor
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -256,7 +259,7 @@ app.whenReady().then(() => {
 
   // 初始化统一调度器
   scheduler.init({
-    collectFn: collectAll,
+    collectFn: () => collectAll(getKimiMonitorLoginMap()),
     onDataFn: (channel, data) => mainWindow?.webContents.send(channel, data)
   })
   scheduler.startBalancePolling()
@@ -307,8 +310,9 @@ app.whenReady().then(() => {
     // 新增供应商后立即触发一次采集
     scheduler.collectBalance()
 
-    // 如果是 DeepSeek 供应商，确保监听器已启动
-    if ((newVendor.provider || '').toLowerCase().includes('deepseek')) {
+    // 如果是 DeepSeek 或 Kimi 供应商，确保监听器已启动
+    const prov = (newVendor.provider || '').toLowerCase()
+    if (prov.includes('deepseek') || prov.includes('kimi')) {
       ensureMonitors()
     }
 
@@ -352,7 +356,7 @@ app.whenReady().then(() => {
         monitor.stop()
         dsMonitors.delete(vendorId)
         scheduler.unregisterMonitor(vendorId)
-        console.log(`[Main] 已停止并移除供应商 ${vendorId} 的监控实例`)
+        console.log(`[Main] 已停止并移除供应商 ${vendorId} 的 DeepSeek 监控实例`)
       }
       // 清除对应的浏览器 session（cookie/localStorage 等）
       try {
@@ -364,6 +368,27 @@ app.whenReady().then(() => {
         console.log(`[Main] 已清除供应商 ${vendorId} 的浏览器 session 数据`)
       } catch (e) {
         console.warn(`[Main] 清除 session 失败:`, e.message)
+      }
+    }
+
+    // 如果是 Kimi 供应商，清理对应的监控实例和浏览器 session
+    if ((deletedVendor.provider || '').toLowerCase().includes('kimi')) {
+      const monitor = kmiMonitors.get(vendorId)
+      if (monitor) {
+        monitor.stop()
+        kmiMonitors.delete(vendorId)
+        scheduler.unregisterMonitor(vendorId)
+        console.log(`[Main] 已停止并移除供应商 ${vendorId} 的 Kimi 监控实例`)
+      }
+      try {
+        const { session } = require('electron')
+        const ses = session.fromPartition(`persist:kimi-${vendorId}`)
+        await ses.clearStorageData({
+          storages: ['cookies', 'localstorage', 'caches', 'serviceworkers']
+        })
+        console.log(`[Main] 已清除供应商 ${vendorId} 的 Kimi session 数据`)
+      } catch (e) {
+        console.warn(`[Main] 清除 Kimi session 失败:`, e.message)
       }
     }
 
@@ -399,7 +424,7 @@ app.whenReady().then(() => {
 
   ipcMain.handle('collect-now', async () => {
     try {
-      const data = await collectAll()
+      const data = await collectAll(getKimiMonitorLoginMap())
       mainWindow?.webContents.send('usage-data-updated', data)
       return data
     } catch (e) {
@@ -436,25 +461,51 @@ app.whenReady().then(() => {
   function ensureMonitors() {
     const vendors = readVendors()
     const deepseekVendors = vendors.filter(v => (v.provider || '').toLowerCase().includes('deepseek'))
+    const kimiVendors = vendors.filter(v => (v.provider || '').toLowerCase().includes('kimi'))
 
-    // 启动缺失的监控
+    // 启动缺失的 DeepSeek 监控
     for (const v of deepseekVendors) {
       if (!dsMonitors.has(v.id)) {
         const monitor = new DeepSeekMonitor(v.id)
+        monitor.onLoginStatusChanged = broadcastLoginStatus
         monitor.start(dsMonitorCallback)
         dsMonitors.set(v.id, monitor)
         scheduler.registerMonitor(v.id, monitor)
-        console.log(`[Main] 为供应商 ${v.customName || v.id} 创建监控实例`)
+        console.log(`[Main] 为供应商 ${v.customName || v.id} 创建 DeepSeek 监控实例`)
       }
     }
 
-    // 停止已删除供应商的监控
+    // 停止已删除供应商的 DeepSeek 监控
     for (const [vendorId, monitor] of dsMonitors) {
       if (!deepseekVendors.find(v => v.id === vendorId)) {
         monitor.stop()
         dsMonitors.delete(vendorId)
         scheduler.unregisterMonitor(vendorId)
-        console.log(`[Main] 移除供应商 ${vendorId} 的监控实例`)
+        console.log(`[Main] 移除供应商 ${vendorId} 的 DeepSeek 监控实例`)
+      }
+    }
+
+    // 启动缺失的 Kimi 监控
+    for (const v of kimiVendors) {
+      if (!kmiMonitors.has(v.id)) {
+        const monitor = new KimiMonitor(v.id)
+        monitor.onLoginStatusChanged = broadcastLoginStatus
+        monitor.start(kmiMonitorCallback)
+        kmiMonitors.set(v.id, monitor)
+        scheduler.registerMonitor(v.id, monitor)
+        console.log(`[Main] 为供应商 ${v.customName || v.id} 创建 Kimi 监控实例`)
+        // 立即触发一次解析，不等待 scheduler 的10分钟轮询
+        setTimeout(() => monitor.refreshNow(), 2000)
+      }
+    }
+
+    // 停止已删除供应商的 Kimi 监控
+    for (const [vendorId, monitor] of kmiMonitors) {
+      if (!kimiVendors.find(v => v.id === vendorId)) {
+        monitor.stop()
+        kmiMonitors.delete(vendorId)
+        scheduler.unregisterMonitor(vendorId)
+        console.log(`[Main] 移除供应商 ${vendorId} 的 Kimi 监控实例`)
       }
     }
   }
@@ -462,8 +513,26 @@ app.whenReady().then(() => {
   // 获取指定 vendorId 的监控实例，或获取任意一个
   function getMonitor(vendorId) {
     if (vendorId && dsMonitors.has(vendorId)) return dsMonitors.get(vendorId)
+    if (vendorId && kmiMonitors.has(vendorId)) return kmiMonitors.get(vendorId)
     // fallback: 返回第一个
-    return dsMonitors.values().next().value || null
+    return dsMonitors.values().next().value || kmiMonitors.values().next().value || null
+  }
+
+  function getKimiMonitorLoginMap() {
+    const map = {}
+    for (const [id, m] of kmiMonitors) map[id] = m.isLoggedIn()
+    return map
+  }
+
+  // ====== 登录状态变更广播 ======
+  const _lastLoginStatus = new Map()
+
+  function broadcastLoginStatus(vendorId, loggedIn) {
+    const prev = _lastLoginStatus.get(vendorId)
+    if (prev === loggedIn) return
+    _lastLoginStatus.set(vendorId, loggedIn)
+    console.log(`[Main] 登录状态变更: ${vendorId} → ${loggedIn ? '已登录' : '未登录'}`)
+    mainWindow?.webContents.send('monitor-login-status-changed', { vendorId, loggedIn })
   }
 
   // 监听器数据回调：收到 DeepSeek 用量页面的数据后转发给 token 统计
@@ -568,6 +637,49 @@ app.whenReady().then(() => {
     }
 
     console.log('[Main] 未处理的数据格式:', payload.type, Object.keys(data || {}).join(', '))
+  }
+
+  // Kimi 监听器数据回调：DOM 解析的 Token 用量数据
+  const kmiMonitorCallback = (payload) => {
+    console.log(`[Main] Kimi 监听器收到数据: ${payload.type} from ${payload.url}`)
+
+    const data = payload.data
+
+    // kimi-dom-parsed: DOM 解析的各模型 Token 总量
+    if (data && data.models && Array.isArray(data.models)) {
+      let hasNewData = false
+      const prevTokensMap = getPrevModelTokens(payload.vendorId)
+      for (const model of data.models) {
+        if (model.tokens > 0) {
+          const prev = prevTokensMap[model.name] || 0
+          const delta = Math.max(0, model.tokens - prev)
+          if (delta === 0) {
+            console.log(`[Main]   ${model.name}: 无增量 (${model.tokens} <= 上次 ${prev})`)
+            continue
+          }
+          const record = {
+            model: model.name || 'unknown',
+            requestId: '',
+            promptTokens: 0,
+            completionTokens: 0,
+            totalTokens: delta,
+            timestamp: payload.timestamp,
+            vendorId: payload.vendorId
+          }
+          recordTokenUsage(record)
+          hasNewData = true
+          console.log(`[Main]   ${model.name}: +${delta} tokens (累计 ${model.tokens})`)
+        }
+      }
+      // 记录快照，供下次增量计算用（与 DeepSeek 一致）
+      const totalTokens = data.models.reduce((sum, m) => sum + (m.tokens || 0), 0)
+      recordHourlySnapshot({ models: data.models, totalTokens }, payload.vendorId)
+
+      if (hasNewData) {
+        mainWindow?.webContents.send('token-stats-updated', getTokenStats())
+      }
+      return
+    }
   }
 
   ensureMonitors()
@@ -858,6 +970,8 @@ app.on('window-all-closed', () => {
   scheduler.stop()
   for (const [, monitor] of dsMonitors) monitor.stop()
   dsMonitors.clear()
+  for (const [, monitor] of kmiMonitors) monitor.stop()
+  kmiMonitors.clear()
   if (process.platform !== 'darwin') app.quit()
 })
 
@@ -868,7 +982,10 @@ app.on('before-quit', (event) => {
   isQuitting = true
   event.preventDefault()
   scheduler.stop()
-  const stopPromises = [...dsMonitors.values()].map(m => m.stop())
+  const stopPromises = [
+    ...[...dsMonitors.values()].map(m => m.stop()),
+    ...[...kmiMonitors.values()].map(m => m.stop())
+  ]
   Promise.all(stopPromises).then(() => {
     flushTokenStats()
     app.quit()

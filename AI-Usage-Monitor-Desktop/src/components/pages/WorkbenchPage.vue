@@ -48,7 +48,7 @@ const vendors = ref([])
 const balance = ref(null)
 const kimiBalances = ref({})
 
-// 4. 模型颜色映射
+// 4. 模型颜色映射（所有供应商的模型统一管理）
 const MODEL_COLORS = {
   'deepseek-chat': '#3b82f6',
   'deepseek-reasoner': '#6366f1',
@@ -56,28 +56,40 @@ const MODEL_COLORS = {
   'deepseek-v4-flash': '#3b82f6',
   'deepseek-v4-pro': '#6366f1',
   'deepseek-v4': '#64748b',
+  'kimi-k2.7-code': '#7c3aed',
+  'kimi-k2.7': '#8b5cf6',
+  'kimi-k3': '#a855f7',
+  'moonshot-v1-8k': '#7c3aed',
+  'moonshot-v1-32k': '#8b5cf6',
+  'moonshot-v1-128k': '#a855f7',
+  'kimi-latest': '#7c3aed',
   'default': '#64748b'
 }
 
-// 从完整模型名提取显示名：deepseek-v4-flash → flash, deepseek-v4-pro → pro
+// 从完整模型名提取显示名
+// deepseek-v4-flash → flash, kimi-k2.7-code → k2.7-code, moonshot-v1-8k → 8k
 function getModelDisplayName(model) {
   if (!model) return model
   const lower = model.toLowerCase()
-  // 匹配 deepseek-vN-xxx 或 deepseek-chat 等模式，提取最后的变体部分
-  const match = lower.match(/^deepseek[-_]?(?:v\d+[-_]?)?(.+)$/)
-  if (match && match[1]) {
-    return match[1].replace(/[-_]/g, ' ')
-  }
-  // deepseek-chat → chat, deepseek-reasoner → reasoner
-  const simple = lower.match(/^deepseek[-_](.+)$/)
-  if (simple && simple[1]) return simple[1]
+  // deepseek 系列
+  const dsMatch = lower.match(/^deepseek[-_]?(?:v\d+[-_]?)?(.+)$/)
+  if (dsMatch && dsMatch[1]) return dsMatch[1].replace(/[-_]/g, ' ')
+  const dsSimple = lower.match(/^deepseek[-_](.+)$/)
+  if (dsSimple && dsSimple[1]) return dsSimple[1]
+  // kimi / moonshot 系列
+  const kimiMatch = lower.match(/^kimi[-_](.+)$/)
+  if (kimiMatch && kimiMatch[1]) return kimiMatch[1]
+  const moonMatch = lower.match(/^moonshot[-_]v\d+[-_](.+)$/)
+  if (moonMatch && moonMatch[1]) return moonMatch[1]
   return model
 }
 
 // 获取模型对应的供应商名
 function getVendorName(model) {
   if (!model) return ''
-  if (model.toLowerCase().startsWith('deepseek')) return 'DeepSeek'
+  const lower = model.toLowerCase()
+  if (lower.startsWith('deepseek')) return 'DeepSeek'
+  if (lower.startsWith('kimi') || lower.startsWith('moonshot')) return 'Kimi'
   return ''
 }
 
@@ -307,6 +319,7 @@ const top3Tokens = computed(() => {
     .map(([model, tokens]) => ({
       name: model,
       displayName: model,
+      vendor: getVendorName(model),
       usedTokens: tokens
     }))
 })
@@ -318,9 +331,12 @@ const selectedVendorName = computed(() => {
   return v?.customName || v?.provider || selectedVendorId.value
 })
 
-// DeepSeek 供应商列表（用于筛选下拉框）
-const deepseekVendors = computed(() => {
-  return (vendors.value || []).filter(v => (v.provider || '').toLowerCase().includes('deepseek'))
+// 支持 Token 统计的供应商列表（用于筛选下拉框）
+const filterableVendors = computed(() => {
+  return (vendors.value || []).filter(v => {
+    const p = (v.provider || '').toLowerCase()
+    return p.includes('deepseek') || p.includes('kimi')
+  })
 })
 
 // 进度条标签
@@ -416,17 +432,25 @@ const updateTokenChart = () => {
     return
   }
 
-  const seriesList = chartData.series.map((s, i) => {
+  // 过滤掉全零的系列（无使用的模型不显示在图例和图表中）
+  const activeSeries = chartData.series.filter(s => s.data.some(v => v > 0))
+
+  // 柱顶圆角半径：按柱宽自适应（约为柱宽的一半，限制在 4~12px），保证视觉顶端圆润
+  const chartWidth = tokenChartRef.value?.clientWidth || 600
+  const approxBarWidth = Math.max((chartWidth * 0.87) / Math.max(chartData.xData.length, 1) / 1.2, 8)
+  const topRadius = Math.min(Math.max(approxBarWidth / 2, 4), 12)
+
+  const seriesList = activeSeries.map((s, i) => {
     // 动态判断每个数据点是否为该柱子的视觉顶端段：
     // 仅当该段非零且其上方所有系列在该点都为 0 时，它才是柱子顶端 → 加圆角；
     // 段与段之间的拼接处保持直角
     const data = s.data.map((v, j) => {
       if (!v || v <= 0) return { value: v, itemStyle: { borderRadius: 0 } }
-      const above = chartData.series.slice(i + 1).reduce((sum, up) => sum + (up.data[j] || 0), 0)
+      const above = activeSeries.slice(i + 1).reduce((sum, up) => sum + (up.data[j] || 0), 0)
       return {
         value: v,
         itemStyle: {
-          borderRadius: above <= 0 ? [4, 4, 0, 0] : 0
+          borderRadius: above <= 0 ? [topRadius, topRadius, 0, 0] : 0
         }
       }
     })
@@ -451,15 +475,18 @@ const updateTokenChart = () => {
       formatter: (params) => {
         if (!params?.length) return ''
         const header = params[0].axisValue
-        const lines = params.map(p => {
-          // data 项可能为 { value, itemStyle } 对象，取其中的原始数值
+        const lines = params.filter(p => {
+          const v = typeof p.value === 'object' && p.value !== null ? p.value.value : p.value
+          return v > 0
+        }).map(p => {
           const v = typeof p.value === 'object' && p.value !== null ? p.value.value : p.value
           return `${p.marker} ${p.seriesName}: ${formatTokenDisplay(v)}`
         })
+        if (lines.length === 0) return ''
         return `${header}<br/>${lines.join('<br/>')}`
       }
     },
-    legend: { orient: 'horizontal', bottom: '0%', left: 'center', icon: 'roundRect', itemWidth: 12, itemHeight: 10, itemGap: 16, textStyle: { color: '#64748b', fontSize: 11 } },
+    legend: { orient: 'horizontal', bottom: '0%', left: 'center', icon: 'roundRect', itemWidth: 12, itemHeight: 10, itemGap: 16, textStyle: { color: '#64748b', fontSize: 11 }, data: seriesList.map(s => s.name) },
     grid: { left: '8%', right: '5%', bottom: '18%', top: '6%' },
     xAxis: {
       type: 'category', data: chartData.xData,
@@ -591,10 +618,6 @@ onUnmounted(() => {
             <div class="total-card-header">
               <span class="total-label">Token 消耗总量</span>
               <div class="time-range-actions">
-                <select class="time-range-select" v-model="selectedVendorId" v-if="deepseekVendors.length > 1">
-                  <option value="all">全部账号</option>
-                  <option v-for="v in deepseekVendors" :key="v.id" :value="v.id">{{ v.customName || v.provider }}</option>
-                </select>
                 <select class="time-range-select" v-model="timeRange">
                   <option value="today">今天</option>
                   <option value="week">本周</option>
@@ -623,6 +646,8 @@ onUnmounted(() => {
                 <div v-if="top3Tokens.length === 0" class="empty-hint">尚无数据</div>
                 <div class="top3-item" v-for="(model, i) in top3Tokens" :key="model.name">
                   <span class="top3-rank" :class="'rank-' + (i + 1)">{{ i + 1 }}</span>
+                  <img v-if="model.vendor === 'DeepSeek'" src="/deepseek.png" class="top3-vendor-icon" />
+                  <img v-else-if="model.vendor === 'Kimi'" src="/kimi.png" class="top3-vendor-icon" />
                   <span class="top3-name">{{ model.displayName }}</span>
                   <span class="top3-value"><CountUpText :value="model.usedTokens" :format="formatTokenDisplay" /></span>
                 </div>
@@ -1046,6 +1071,13 @@ onUnmounted(() => {
 .top3-rank.rank-1 { background: #ef4444; }
 .top3-rank.rank-2 { background: #f59e0b; }
 .top3-rank.rank-3 { background: #3b82f6; }
+
+.top3-vendor-icon {
+  width: 16px;
+  height: 16px;
+  border-radius: 3px;
+  flex-shrink: 0;
+}
 
 .top3-name {
   font-size: 0.8125rem;

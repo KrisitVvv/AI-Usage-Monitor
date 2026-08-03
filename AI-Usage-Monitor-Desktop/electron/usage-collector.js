@@ -525,6 +525,58 @@ function formatHourKey(h) {
 }
 
 /**
+ * 计算某供应商作用域在历史快照中的基线（最近一个非空快照日期的最后累计值）
+ * @param {Object} stats - token 统计数据
+ * @param {string} scopeKey - 快照作用域 key（如 'default' 或 'vendor_xxx'）
+ * @returns {{ total: number, models: Object }|null} 基线；无历史数据返回 null
+ */
+function getSnapshotBaseline(stats, scopeKey) {
+  const date = new Date()
+  for (let i = 1; i <= 35; i++) {
+    date.setDate(date.getDate() - 1)
+    const key = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
+    const vendorSnap = stats.hourlySnapshots?.[key]?.[scopeKey]
+    if (!vendorSnap || typeof vendorSnap !== 'object') continue
+    const hours = Object.keys(vendorSnap).sort()
+    if (hours.length === 0) continue
+    const last = vendorSnap[hours[hours.length - 1]]
+    return {
+      total: last.totalTokens || 0,
+      models: last.models || {}
+    }
+  }
+  return null
+}
+
+/**
+ * 读取供应商列表，建立 vendorId → provider（小写）映射
+ */
+function getVendorProviderMap() {
+  try {
+    const raw = safeReadJSON(getUserDataPath(VENDORS_FILE_NAME), [])
+    const list = Array.isArray(raw) ? raw : (raw.vendors || [])
+    const map = {}
+    for (const v of list) {
+      if (v && v.id) map[String(v.id)] = String(v.provider || '').toLowerCase()
+    }
+    return map
+  } catch (e) {
+    return {}
+  }
+}
+
+/**
+ * 判断某供应商快照是否为「今日累计」语义。
+ * - Kimi 平台展示的是当日用量明细求和，首个快照值即当天至今的用量，无基线时可直接计入当天；
+ * - DeepSeek 平台展示的是近 30 天滚动总量，无基线时无法区分当天增量，只能作为新基线（增量为 0）。
+ */
+function isTodayAccumScope(scopeKey) {
+  if (scopeKey === 'default') return false
+  const provider = getVendorProviderMap()[String(scopeKey).replace(/^vendor_/, '')] || ''
+  return provider.includes('kimi')
+}
+
+/**
  * 获取今日每小时的 token 差值（用于趋势图）
  * @param {string} vendorId - 供应商 ID，用于隔离多账号数据
  * 返回格式: [{ hour: '09:00', delta: 12345, models: { model: delta } }]
@@ -534,123 +586,94 @@ function getTodayHourlyDeltas(vendorId) {
   const todayKey = getTodayKey()
   const snapshots = stats.hourlySnapshots?.[todayKey] || {}
 
-  // 计算基线：向前回溯最近一个非空快照日期（最多 35 天）的最后快照累计值
-  // 用于修正当天第一个快照的 delta，覆盖跨午夜、跨月、多天未运行等场景，
-  // 避免昨日无快照导致基线为空、把滚动总量误当当天增量
-  let baselineTotal = 0
-  const baselineModels = {}
-  const baseDate = new Date()
-  for (let i = 1; i <= 35; i++) {
-    baseDate.setDate(baseDate.getDate() - 1)
-    const key = `${baseDate.getFullYear()}-${String(baseDate.getMonth() + 1).padStart(2, '0')}-${String(baseDate.getDate()).padStart(2, '0')}`
-    const baseSnapshots = stats.hourlySnapshots?.[key] || {}
-    for (const [vKey, vendorSnap] of Object.entries(baseSnapshots)) {
-      if (!vendorSnap || typeof vendorSnap !== 'object') continue
-      if (vendorId && vKey !== `vendor_${vendorId}`) continue
-      const hours = Object.keys(vendorSnap).sort()
-      if (hours.length > 0) {
-        const last = vendorSnap[hours[hours.length - 1]]
-        baselineTotal += last.totalTokens || 0
-        for (const [modelName, modelData] of Object.entries(last.models || {})) {
-          baselineModels[modelName] = (baselineModels[modelName] || 0) + (modelData.tokens || 0)
-        }
-      }
-    }
-    if (Object.keys(baselineModels).length > 0) break
-  }
+  // 确定要处理的供应商作用域（未指定时处理全部）
+  const scopeKeys = vendorId ? [`vendor_${vendorId}`] : Object.keys(snapshots)
+  if (scopeKeys.length === 0) return []
 
-  // 合并所有 vendor 的快照数据（按小时聚合）
-  const mergedSnapshots = {}
-  for (const [key, vendorSnap] of Object.entries(snapshots)) {
-    if (!vendorSnap || typeof vendorSnap !== 'object') continue
-    // 如果指定了 vendorId，只取该 vendor 的数据
-    if (vendorId && key !== `vendor_${vendorId}`) continue
-    for (const [hour, snapshot] of Object.entries(vendorSnap)) {
-      if (!mergedSnapshots[hour]) {
-        mergedSnapshots[hour] = { ...snapshot, models: { ...snapshot.models } }
-      } else {
-        // 聚合：totalTokens / totalRequests 累加，models 按模型名合并
-        const prev = mergedSnapshots[hour]
-        prev.totalTokens = (prev.totalTokens || 0) + (snapshot.totalTokens || 0)
-        prev.totalRequests = (prev.totalRequests || 0) + (snapshot.totalRequests || 0)
-        for (const [modelName, modelData] of Object.entries(snapshot.models || {})) {
-          if (!prev.models[modelName]) {
-            prev.models[modelName] = { ...modelData }
-          } else {
-            prev.models[modelName].tokens = (prev.models[modelName].tokens || 0) + (modelData.tokens || 0)
-            prev.models[modelName].requests = (prev.models[modelName].requests || 0) + (modelData.requests || 0)
-          }
-        }
-      }
-    }
-  }
-
-  const hours = Object.keys(mergedSnapshots).sort()
-
-  if (hours.length < 1) return []
-
-  // 按归属小时聚合 delta（整点快照归上一小时，手动刷新归当前小时）
+  // 按供应商作用域分别计算每小时增量，再合并结果。
+  // 各供应商快照时间交错时，若混在一起计算增量，会把 A 供应商的累计值
+  // 误当成 B 供应商的基线，导致某小时柱子出现"全部累计总量"的错误峰值。
   const deltasMap = {}
-  let prev = null
 
-  for (const hour of hours) {
-    const curr = mergedSnapshots[hour]
-    if (!curr) continue
+  for (const scopeKey of scopeKeys) {
+    const vendorSnap = snapshots[scopeKey]
+    if (!vendorSnap || typeof vendorSnap !== 'object') continue
+    const hours = Object.keys(vendorSnap).sort()
+    if (hours.length === 0) continue
 
-    // 计算该快照相对前一个快照（或昨日基线）的增量
-    let delta, requests, modelDeltas
-    if (prev) {
-      delta = Math.max(0, curr.totalTokens - prev.totalTokens)
-      requests = Math.max(0, (curr.totalRequests || 0) - (prev.totalRequests || 0))
-      modelDeltas = {}
-      for (const [name, data] of Object.entries(curr.models || {})) {
-        const prevData = prev.models?.[name]
-        const mDelta = prevData ? Math.max(0, data.tokens - prevData.tokens) : data.tokens
-        if (mDelta > 0) modelDeltas[name] = mDelta
+    // 该供应商的昨日基线：修正当天第一个快照的 delta，覆盖跨午夜、跨月、多天未运行等场景
+    const baseline = getSnapshotBaseline(stats, scopeKey)
+    const todayAccum = isTodayAccumScope(scopeKey)
+
+    let prev = null
+    for (const hour of hours) {
+      const curr = vendorSnap[hour]
+      if (!curr) continue
+
+      // 计算该快照相对前一个快照（或昨日基线）的增量（仅在同一供应商内比较）
+      let delta, requests, modelDeltas
+      if (prev) {
+        delta = Math.max(0, (curr.totalTokens || 0) - (prev.totalTokens || 0))
+        requests = Math.max(0, (curr.totalRequests || 0) - (prev.totalRequests || 0))
+        modelDeltas = {}
+        for (const [name, data] of Object.entries(curr.models || {})) {
+          const mDelta = Math.max(0, data.tokens - (prev.models?.[name]?.tokens || 0))
+          if (mDelta > 0) modelDeltas[name] = mDelta
+        }
+      } else if (baseline && !(todayAccum && (curr.totalTokens || 0) < baseline.total)) {
+        // 当天第一个快照 — 使用该供应商昨日最后快照作为基线，反映当天实际增量；
+        // 今日累计型供应商若当前值小于昨日基线，说明当日明细已跨天清零，转入下方分支按当天用量处理
+        delta = Math.max(0, (curr.totalTokens || 0) - baseline.total)
+        requests = curr.totalRequests || 0
+        modelDeltas = {}
+        for (const [name, data] of Object.entries(curr.models || {})) {
+          const mDelta = Math.max(0, data.tokens - (baseline.models?.[name]?.tokens || 0))
+          if (mDelta > 0) modelDeltas[name] = mDelta
+        }
+      } else if (todayAccum) {
+        // 今日累计型供应商（如 Kimi 当日明细求和）：
+        // 首个快照值即当天至今的用量，直接计入，避免因无历史基线/跨天清零而被归零
+        delta = curr.totalTokens || 0
+        requests = curr.totalRequests || 0
+        modelDeltas = {}
+        for (const [name, data] of Object.entries(curr.models || {})) {
+          const t = data.tokens || 0
+          if (t > 0) modelDeltas[name] = t
+        }
+      } else {
+        // 滚动累计型供应商（如 DeepSeek 近 30 天总量）无历史基线：
+        // 无法区分累计总量与当天增量，将第一个快照作为新基线（增量为 0），
+        // 避免把滚动累计总量误记为当天用量
+        delta = 0
+        requests = 0
+        modelDeltas = {}
       }
-    } else if (baselineTotal > 0) {
-      // 第一个快照 — 使用昨日最后快照作为基线，更精确地反映当天实际增量
-      delta = Math.max(0, curr.totalTokens - baselineTotal)
-      requests = curr.totalRequests || 0
-      modelDeltas = {}
-      for (const [name, data] of Object.entries(curr.models || {})) {
-        const mDelta = Math.max(0, data.tokens - (baselineModels[name] || 0))
-        if (mDelta > 0) modelDeltas[name] = mDelta
-      }
-    } else {
-      // 无基线数据（首次运行），只能使用当前累计值
-      delta = curr.totalTokens
-      requests = curr.totalRequests || 0
-      modelDeltas = Object.fromEntries(Object.entries(curr.models || {}).map(([n, d]) => [n, d.tokens]))
-    }
 
-    // 归属小时调整（整点归上一小时，非整点归当前小时）
-    const assignHour = getAssignHour(hour)
-    if (assignHour < 0) {
+      // 归属小时调整（整点快照归上一小时，非整点归当前小时）
+      const assignHour = getAssignHour(hour)
+      if (assignHour < 0) {
+        prev = curr
+        continue
+      }
+      const bucket = deltasMap[assignHour] || (deltasMap[assignHour] = {
+        hour: formatHourKey(assignHour),
+        delta: 0,
+        requests: 0,
+        models: {}
+      })
+      bucket.delta += delta
+      bucket.requests += requests
+      for (const [name, t] of Object.entries(modelDeltas)) {
+        bucket.models[name] = (bucket.models[name] || 0) + t
+      }
+
       prev = curr
-      continue
     }
-    const bucket = deltasMap[assignHour] || (deltasMap[assignHour] = {
-      hour: formatHourKey(assignHour),
-      delta: 0,
-      requests: 0,
-      models: {},
-      totalTokens: curr.totalTokens
-    })
-    bucket.delta += delta
-    bucket.requests += requests
-    for (const [name, t] of Object.entries(modelDeltas)) {
-      bucket.models[name] = (bucket.models[name] || 0) + t
-    }
-
-    prev = curr
   }
 
-  const deltas = Object.keys(deltasMap)
+  return Object.keys(deltasMap)
     .sort((a, b) => a - b)
     .map(k => deltasMap[k])
-
-  return deltas
 }
 
 /**
@@ -869,7 +892,7 @@ async function resetDeepSeekBudget() {
 }
 
 // ---------- 核心采集逻辑 ----------
-async function collectAll() {
+async function collectAll(kimiMonitorLoggedInMap = {}) {
   const vendorsPath = getUserDataPath(VENDORS_FILE_NAME)
 
   const emptyResult = (vendors, errors = []) => ({
@@ -928,8 +951,12 @@ async function collectAll() {
       // 尝试从缓存恢复
       const prevBal = prevCache?.kimiBalances?.[kv.id] || prevCache?.kimiBalance
       if (prevBal) {
-        kimiBalances[kv.id] = { ...prevBal, _stale: true }
-        errors.push(`${kv.customName || kv.id}: ${e.message} (使用缓存数据)`)
+        // Monitor 已登录时 DOM 解析提供实时数据，缓存不视为 stale
+        const monitorActive = kimiMonitorLoggedInMap[kv.id]
+        kimiBalances[kv.id] = { ...prevBal, _stale: !monitorActive }
+        if (!monitorActive) {
+          errors.push(`${kv.customName || kv.id}: ${e.message} (使用缓存数据)`)
+        }
       } else {
         errors.push(`${kv.customName || kv.id}: ${e.message}`)
       }
