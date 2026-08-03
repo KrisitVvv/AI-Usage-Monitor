@@ -707,6 +707,82 @@ async function fetchDeepSeekBalance(apiKey) {
   }
 }
 
+// ---------- Kimi 余额查询 ----------
+// 参考: https://platform.kimi.com/docs - 查询余额
+// GET https://api.moonshot.cn/v1/users/me/balance
+async function fetchKimiBalance(apiKey) {
+  const resp = await fetch('https://api.moonshot.cn/v1/users/me/balance', {
+    headers: {
+      'Authorization': `Bearer ${apiKey}`,
+      'Content-Type': 'application/json'
+    }
+  })
+
+  if (!resp.ok) {
+    throw new Error(`Kimi API 返回 ${resp.status}: ${await resp.text()}`)
+  }
+
+  const data = await resp.json()
+
+  // 响应码 0 表示成功；失败时带 error 对象
+  if (data.code !== 0 || !data.data) {
+    throw new Error(data.error?.message || `Kimi API 响应异常: ${JSON.stringify(data).substring(0, 200)}`)
+  }
+
+  const available = parseFloat(data.data.available_balance || 0)
+  return {
+    available_balance: available,        // 可用余额（现金 + 代金券），<= 0 时无法调用推理 API
+    voucher_balance: parseFloat(data.data.voucher_balance || 0),  // 代金券余额
+    cash_balance: parseFloat(data.data.cash_balance || 0),        // 现金余额（可为负）
+    currency: 'CNY',
+    is_available: available > 0,
+    fetchedAt: new Date().toISOString()
+  }
+}
+
+/**
+ * 计算 Kimi 余额（计量计价，余额 = 金额）
+ *
+ * 无"累计充值"字段，改用余额变化追踪：
+ * - 首次采集：以当前可用余额作为累计预算
+ * - 之后余额上涨（充值）→ 差值计入累计预算
+ * - 余额下降（消费）→ spent 自动 = 累计预算 - 当前余额
+ */
+function computeKimiBalance(raw, prevCache, vendorId) {
+  const balances = prevCache?.kimiBalances || {}
+  const prev = vendorId ? (balances[vendorId] || prevCache?.kimiBalance || null) : null
+  const prevRemaining = prev?.remaining ?? null
+  const prevBudget = prev?.totalBudget || 0
+
+  const remaining = raw.available_balance
+
+  let totalBudget = prevBudget
+  if (prevRemaining !== null) {
+    if (remaining > prevRemaining) {
+      // 检测到充值：累加差额
+      totalBudget += (remaining - prevRemaining)
+    }
+  } else {
+    // 首次运行：以当前余额为基准
+    totalBudget = remaining
+  }
+
+  const spent = Math.max(0, totalBudget - remaining)
+  const usedPercent = totalBudget > 0 ? Math.round((spent / totalBudget) * 100) : 0
+
+  return {
+    totalBudget,        // 累计预算（充值追踪）
+    remaining,           // 当前可用余额
+    spent,               // 已消费
+    usedPercent,
+    voucher_balance: raw.voucher_balance,
+    cash_balance: raw.cash_balance,
+    currency: raw.currency,
+    is_available: raw.is_available,
+    fetchedAt: raw.fetchedAt
+  }
+}
+
 // ---------- 累计充值追踪 ----------
 function computeBalance(raw, prevCache, vendorId) {
   const balances = prevCache?.deepseekBalances || {}
@@ -796,47 +872,35 @@ async function resetDeepSeekBudget() {
 async function collectAll() {
   const vendorsPath = getUserDataPath(VENDORS_FILE_NAME)
 
+  const emptyResult = (vendors, errors = []) => ({
+    vendors,
+    errors,
+    lastCollect: new Date().toISOString(),
+    deepseekBalance: null,
+    deepseekBalances: {},
+    kimiBalance: null,
+    kimiBalances: {}
+  })
+
   if (!fs.existsSync(vendorsPath)) {
-    return {
-      vendors: [],
-      errors: [],
-      lastCollect: new Date().toISOString(),
-      deepseekBalance: null,
-      deepseekBalances: {}
-    }
+    return emptyResult([])
   }
 
   let vendors = []
   try {
     vendors = JSON.parse(fs.readFileSync(vendorsPath, 'utf-8'))
   } catch {
-    return {
-      vendors: [],
-      errors: ['供应商配置文件损坏'],
-      lastCollect: new Date().toISOString(),
-      deepseekBalance: null,
-      deepseekBalances: {}
-    }
+    return emptyResult([], ['供应商配置文件损坏'])
   }
 
   const deepseekVendors = vendors.filter(v => v.provider === 'DeepSeek API' && v.apiKey)
+  const kimiVendors = vendors.filter(v => v.provider === 'Kimi CN' && v.apiKey)
   const errors = []
   const prevCache = readCache()
 
   // 为每个 DeepSeek vendor 独立获取 balance
   const deepseekBalances = {}
   let firstRaw = null
-
-  if (deepseekVendors.length === 0) {
-    return {
-      vendors,
-      errors: ['未找到 DeepSeek API 配置，请先添加供应商'],
-      lastCollect: new Date().toISOString(),
-      deepseekBalance: null,
-      deepseekBalances: {}
-    }
-  }
-
   for (const dv of deepseekVendors) {
     try {
       const raw = await fetchDeepSeekBalance(dv.apiKey)
@@ -854,8 +918,31 @@ async function collectAll() {
     }
   }
 
-  // 兼容：deepseekBalance 取第一个 vendor 的 balance
-  const firstBalance = deepseekBalances[deepseekVendors[0].id] || null
+  // 为每个 Kimi vendor 独立获取 balance
+  const kimiBalances = {}
+  for (const kv of kimiVendors) {
+    try {
+      const raw = await fetchKimiBalance(kv.apiKey)
+      kimiBalances[kv.id] = computeKimiBalance(raw, prevCache, kv.id)
+    } catch (e) {
+      // 尝试从缓存恢复
+      const prevBal = prevCache?.kimiBalances?.[kv.id] || prevCache?.kimiBalance
+      if (prevBal) {
+        kimiBalances[kv.id] = { ...prevBal, _stale: true }
+        errors.push(`${kv.customName || kv.id}: ${e.message} (使用缓存数据)`)
+      } else {
+        errors.push(`${kv.customName || kv.id}: ${e.message}`)
+      }
+    }
+  }
+
+  if (deepseekVendors.length === 0 && kimiVendors.length === 0) {
+    return emptyResult(vendors, ['未找到可采集余额的供应商配置，请先添加供应商'])
+  }
+
+  // 兼容：deepseekBalance / kimiBalance 取第一个 vendor 的 balance
+  const firstBalance = deepseekBalances[deepseekVendors[0]?.id] || null
+  const firstKimiBalance = kimiBalances[kimiVendors[0]?.id] || null
 
   const cacheData = {
     vendors,
@@ -863,6 +950,8 @@ async function collectAll() {
     lastCollect: new Date().toISOString(),
     deepseekBalance: firstBalance,
     deepseekBalances,
+    kimiBalance: firstKimiBalance,
+    kimiBalances,
     _raw: firstRaw
   }
   writeCache(cacheData)

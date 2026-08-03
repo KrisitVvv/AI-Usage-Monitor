@@ -377,6 +377,8 @@ app.whenReady().then(() => {
         if (vendors.length === 0) {
           delete cache.deepseekBalance
           delete cache.deepseekBalances
+          delete cache.kimiBalance
+          delete cache.kimiBalances
         }
         writeCache(cache)
         mainWindow?.webContents.send('usage-data-updated', cache)

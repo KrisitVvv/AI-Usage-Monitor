@@ -33,9 +33,9 @@ onMounted(async () => {
       if (data) {
         const found = data.vendors?.find(v => v.id === route.params.id)
         vendor.value = found || null
-        // 按 vendor ID 查找 balance，找不到则用全局 fallback
-        const balances = data.deepseekBalances || {}
-        balance.value = balances[route.params.id] || data.deepseekBalance || null
+        // 按 vendor ID 查找 balance（DeepSeek / Kimi），找不到则用全局 fallback
+        const balances = { ...(data.deepseekBalances || {}), ...(data.kimiBalances || {}) }
+        balance.value = balances[route.params.id] || data.deepseekBalance || data.kimiBalance || null
       }
     } catch { /* 忽略 */ }
 
@@ -57,8 +57,8 @@ onMounted(async () => {
         }
         vendor.value = found
       }
-      const balances = data.deepseekBalances || {}
-      const newBalance = balances[route.params.id] || data.deepseekBalance
+      const balances = { ...(data.deepseekBalances || {}), ...(data.kimiBalances || {}) }
+      const newBalance = balances[route.params.id] || data.deepseekBalance || data.kimiBalance
       if (newBalance) balance.value = newBalance
     })
   }
@@ -75,7 +75,7 @@ const goBack = () => router.push({ name: 'progress' })
 const isDeepSeek = computed(() => vendor.value?.provider === 'DeepSeek API')
 const isPlan = computed(() => vendor.value?.billingModel === 'plan')
 const isToken = computed(() => vendor.value?.billingModel === 'token')
-const hasBalance = computed(() => isDeepSeek.value && balance.value)
+const hasBalance = computed(() => !!balance.value)
 const isLive = computed(() => isDeepSeek.value ? monitorLoggedIn.value : (hasBalance.value && !balance.value?._stale))
 const isLoggedIn = computed(() => isDeepSeek.value ? monitorLoggedIn.value : hasBalance.value)
 const displayName = computed(() => vendor.value?.customName || shortName(vendor.value?.provider || ''))
@@ -119,7 +119,7 @@ function cancelRename() { renaming.value = false }
 
 function shortName(provider) {
   const map = {
-    'DeepSeek API': 'DeepSeek', 'OpenAI API': 'OpenAI', 'Kimi API': 'Kimi',
+    'DeepSeek API': 'DeepSeek', 'OpenAI API': 'OpenAI', 'Kimi CN': 'Kimi CN',
     'Aliyun API': '阿里云', '智谱 AI': 'GLM', 'Anthropic': 'Claude',
     'Google AI': 'Gemini', 'Stability AI': 'SDXL', '百度文心': '文心', '科大讯飞': '讯飞'
   }
@@ -275,12 +275,12 @@ async function resetBudget() {
 
       <!-- 厂商头部 -->
       <div class="vendor-header">
-        <div class="vendor-avatar" :style="vendorType === 'DeepSeek' ? {} : { backgroundColor: modelColor }">
+        <div class="vendor-avatar" :style="(vendorType === 'DeepSeek' || vendorType === 'Moonshot') ? {} : { backgroundColor: modelColor }">
           <template v-if="vendorType === 'DeepSeek'">
             <img src="/deepseek.png" alt="DeepSeek" style="width: 52px; height: 52px; object-fit: contain;" />
           </template>
           <template v-else-if="vendorType === 'Moonshot'">
-            <svg width="28" height="28" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="10" stroke="white" stroke-width="1.5" fill="none"/><path d="M12 6v6l4 2" stroke="white" stroke-width="1.5" stroke-linecap="round"/></svg>
+            <img src="/kimi.png" alt="Kimi" style="width: 52px; height: 52px; object-fit: contain;" />
           </template>
           <template v-else-if="vendorType === 'OpenAI'">
             <svg width="28" height="28" viewBox="0 0 24 24" fill="none"><path d="M12 2a4 4 0 014 4v4a4 4 0 01-4 4 4 4 0 01-4-4V6a4 4 0 014-4z" fill="white" opacity="0.6"/><path d="M12 10a4 4 0 014 4v4a4 4 0 01-4 4 4 4 0 01-4-4v-4a4 4 0 014-4z" fill="white"/></svg>
@@ -365,10 +365,11 @@ async function resetBudget() {
             <span class="hf-value">{{ formatMoney(allowanceData.spent, allowanceData.currency) }}</span>
           </div>
           <div class="hero-foot-item">
-            <span class="hf-label">赠送余额</span>
-            <span class="hf-value">{{ formatMoney(balance?.granted_balance || 0, allowanceData.currency) }}</span>
+            <span class="hf-label">{{ isDeepSeek ? '赠送余额' : '代金券' }}</span>
+            <span class="hf-value">{{ formatMoney(isDeepSeek ? (balance?.granted_balance || 0) : (balance?.voucher_balance || 0), allowanceData.currency) }}</span>
           </div>
           <button
+            v-if="isDeepSeek"
             class="reset-btn"
             :class="{ loading: resetting }"
             :disabled="resetting"
@@ -439,8 +440,8 @@ async function resetBudget() {
               </span>
             </div>
             <div class="detail-item detail-item-full">
-              <span class="detail-label">赠送余额</span>
-              <span class="detail-value mono">{{ formatMoney(balance?.granted_balance || 0, allowanceData.currency) }}</span>
+              <span class="detail-label">{{ isDeepSeek ? '赠送余额' : '代金券余额' }}</span>
+              <span class="detail-value mono">{{ formatMoney(isDeepSeek ? (balance?.granted_balance || 0) : (balance?.voucher_balance || 0), allowanceData.currency) }}</span>
             </div>
             <div class="detail-item detail-item-full">
               <span class="detail-label">数据来源</span>

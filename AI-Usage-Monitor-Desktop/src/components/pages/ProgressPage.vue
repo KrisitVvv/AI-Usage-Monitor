@@ -20,7 +20,7 @@ function vendorColor(name) {
 
 function shortName(provider) {
   const map = {
-    'DeepSeek API': 'DeepSeek', 'OpenAI API': 'OpenAI', 'Kimi API': 'Kimi',
+    'DeepSeek API': 'DeepSeek', 'OpenAI API': 'OpenAI', 'Kimi CN': 'KIMI',
     'Aliyun API': '阿里云', '智谱 AI': 'GLM', 'Anthropic': 'Claude',
     'Google AI': 'Gemini', 'Stability AI': 'SDXL', '百度文心': '文心', '科大讯飞': '讯飞'
   }
@@ -29,16 +29,19 @@ function shortName(provider) {
 
 // ---------- 从实时数据构建卡片列表 ----------
 const mergedModelList = computed(() => {
-  const balances = realtimeUsage.value.deepseekBalances || {}
+  const balances = {
+    ...(realtimeUsage.value.deepseekBalances || {}),
+    ...(realtimeUsage.value.kimiBalances || {})
+  }
   const fallbackBalance = realtimeUsage.value.deepseekBalance
   const savedVendors = realtimeUsage.value.vendors || []
   if (!savedVendors.length) return []
 
   return savedVendors.map(v => {
     const isDeepSeek = v.provider === 'DeepSeek API'
-    // 按 vendor ID 查找 balance，找不到则用全局 fallback
-    const balanceData = isDeepSeek ? (balances[v.id] || fallbackBalance) : null
-    const hasBalance = isDeepSeek && balanceData
+    // 按 vendor ID 查找 balance，DeepSeek 额外支持全局 fallback
+    const balanceData = balances[v.id] || (isDeepSeek ? fallbackBalance : null)
+    const hasBalance = !!balanceData
     const base = {
       id: v.id,
       name: v.customName || shortName(v.provider),
@@ -58,7 +61,7 @@ const mergedModelList = computed(() => {
 
       if (v.billingModel === 'plan') {
         base.allowance = {
-          planName: 'DeepSeek 余额',
+          planName: `${base.name} 余额`,
           remainingTokens: remaining,
           planTokensTotal: totalBudget,
           planTokensUsed: spent,
@@ -218,6 +221,9 @@ onUnmounted(() => { if (typeof unsubscribe === 'function') unsubscribe() })
               <div v-if="m.provider === 'DeepSeek API'" class="vendor-avatar vendor-avatar-img">
                 <img class="vendor-logo-img" src="/deepseek.png" alt="DeepSeek" />
               </div>
+              <div v-else-if="m.provider === 'Kimi CN'" class="vendor-avatar vendor-avatar-img">
+                <img class="vendor-logo-img" src="/kimi.png" alt="Kimi" />
+              </div>
               <div v-else class="vendor-avatar" :style="{ backgroundColor: m.color }">
                 <span class="avatar-letter">{{ m.name.charAt(0) }}</span>
               </div>
@@ -301,6 +307,9 @@ onUnmounted(() => { if (typeof unsubscribe === 'function') unsubscribe() })
             <div class="card-row-top">
               <div v-if="m.provider === 'DeepSeek API'" class="vendor-avatar vendor-avatar-img">
                 <img class="vendor-logo-img" src="/deepseek.png" alt="DeepSeek" />
+              </div>
+              <div v-else-if="m.provider === 'Kimi CN'" class="vendor-avatar vendor-avatar-img">
+                <img class="vendor-logo-img" src="/kimi.png" alt="Kimi" />
               </div>
               <div v-else class="vendor-avatar" :style="{ backgroundColor: m.color }">
                 <span class="avatar-letter">{{ m.name.charAt(0) }}</span>

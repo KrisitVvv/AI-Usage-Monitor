@@ -6,7 +6,7 @@ const emit = defineEmits(['close', 'saved'])
 // ---------- 供应商与计费模式配置 ----------
 const PROVIDERS = [
   { name: 'DeepSeek API', billingModels: ['token'] },
-  { name: 'Kimi API', billingModels: ['plan', 'token'] },
+  { name: 'Kimi CN', billingModels: ['token'] },
   { name: 'OpenAI API', billingModels: ['plan', 'token'] },
   { name: 'Aliyun API', billingModels: ['token', 'plan'] },
   { name: '智谱 AI', billingModels: ['token'] },

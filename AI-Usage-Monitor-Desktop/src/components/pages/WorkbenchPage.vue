@@ -46,6 +46,7 @@ async function manualRefresh() {
 // 3. 供应商列表和余额
 const vendors = ref([])
 const balance = ref(null)
+const kimiBalances = ref({})
 
 // 4. 模型颜色映射
 const MODEL_COLORS = {
@@ -342,13 +343,16 @@ const modelUsageAndQuotas = computed(() => {
     const providerShort = vendorName.replace(/\s*API$/i, '').trim() || vendorName
     const displayName = v.customName || providerShort
 
-    // 使用 balance 数据（当前只有 DeepSeek 的实时余额）
-    const isCurrentVendor = vendorName.toLowerCase().includes('deepseek') && bal
-    const budget = isCurrentVendor ? (bal.totalBudget || 0) : 0
-    const remaining = isCurrentVendor ? (bal.remaining || 0) : 0
-    const spent = isCurrentVendor ? (bal.spent || 0) : 0
-    const usedPercent = isCurrentVendor ? (bal.usedPercent || 0) : 0
-    const currency = bal?.currency === 'CNY' ? '¥' : '$'
+    // 使用 balance 数据（DeepSeek 用全局余额，Kimi 按 vendorId 取余额）
+    const isDeepSeek = vendorName.toLowerCase().includes('deepseek')
+    const isKimi = vendorName.toLowerCase().includes('kimi')
+    const vendorBal = isDeepSeek ? bal : (isKimi ? (kimiBalances.value[v.id] || null) : null)
+    const isCurrentVendor = !!vendorBal
+    const budget = isCurrentVendor ? (vendorBal.totalBudget || 0) : 0
+    const remaining = isCurrentVendor ? (vendorBal.remaining || 0) : 0
+    const spent = isCurrentVendor ? (vendorBal.spent || 0) : 0
+    const usedPercent = isCurrentVendor ? (vendorBal.usedPercent || 0) : 0
+    const currency = vendorBal?.currency === 'CNY' ? '¥' : '$'
 
     list.push({
       id: v.id,
@@ -364,7 +368,7 @@ const modelUsageAndQuotas = computed(() => {
       unit: currency,
       status: usedPercent >= 90 ? 'danger' : usedPercent >= 75 ? 'warning' : 'safe',
       apiKey: v.apiKey ? '***' + v.apiKey.slice(-4) : '',
-      _live: isCurrentVendor && !bal?._stale
+      _live: isCurrentVendor && !vendorBal?._stale
     })
   }
 
@@ -525,6 +529,7 @@ onMounted(async () => {
       if (usageData) {
         vendors.value = usageData.vendors || []
         balance.value = usageData.deepseekBalance || null
+        kimiBalances.value = usageData.kimiBalances || {}
       }
     } catch (e) {
       console.warn('[Workbench] 加载用量数据失败:', e.message)
@@ -543,6 +548,7 @@ onMounted(async () => {
     unsubscribeUsage = window.electronAPI.onUsageDataUpdated((data) => {
       if (data.vendors) vendors.value = data.vendors
       balance.value = data.deepseekBalance || null
+      kimiBalances.value = data.kimiBalances || {}
     })
   } else {
     tokenStatsError.value = '运行环境不支持（非 Electron）'
@@ -644,6 +650,7 @@ onUnmounted(() => {
               <div class="model-progress-header">
                 <div class="model-meta">
                   <span v-if="model.provider?.toLowerCase().includes('deepseek')" class="model-logo"><img class="vendor-logo-img" src="/deepseek.png" alt="DeepSeek" /></span>
+                  <span v-else-if="model.provider?.toLowerCase().includes('kimi')" class="model-logo"><img class="vendor-logo-img" src="/kimi.png" alt="Kimi" /></span>
                   <span v-else class="model-badge" :class="model.type?.toLowerCase() + '-badge' || 'default-badge'">{{ model.type || 'API' }}</span>
                   <span class="model-name-text">{{ model.name }}</span>
                   <span v-if="model._live" class="live-badge">实时</span>
