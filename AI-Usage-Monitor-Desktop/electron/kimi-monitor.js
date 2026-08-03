@@ -233,10 +233,12 @@ class KimiMonitor {
       const raw = await this.monitorWindow.webContents.executeJavaScript(`
         (async () => {
           const numPattern = /[,，\s]/g
-          const allResults = []
+          const allRows = []
+          const seen = new Set() // 全局行指纹去重，防止翻页/刷新过程中重复计数
 
+          // 解析当前可见表格中的所有明细行（每行 = 一次请求的 input + output）
           function parseCurrentPage() {
-            const results = []
+            const rows = []
             const tables = document.querySelectorAll('table')
             for (const table of tables) {
               let headerCells = table.querySelectorAll('thead th, thead td')
@@ -269,40 +271,84 @@ class KimiMonitor {
                   ? parseInt((cells[outputIdx]?.textContent || '').replace(numPattern, ''), 10) || 0
                   : 0
                 const total = inputTokens + outputTokens
-                if (total > 0) results.push({ model: modelName, tokens: total })
+                if (total > 0) rows.push({ model: modelName, input: inputTokens, output: outputTokens, tokens: total })
               }
-              if (results.length > 0) break
             }
-            return results
+            return rows
           }
 
-          // 翻页：点击"下一页"按钮直到最后一页（最多50页防死循环）
-          function goNextPage() {
-            // Ant Design 分页：找 > 箭头按钮或 aria-label="Next Page"
-            const nextBtn = document.querySelector(
-              'li.ant-pagination-next:not(.ant-pagination-disabled) button,' +
-              'li[class*="next"]:not([class*="disabled"]) button,' +
-              'button[aria-label="Next Page"]:not([disabled]),' +
-              '.ant-pagination-next:not(.ant-pagination-disabled) a'
-            )
-            if (!nextBtn) return false
-            nextBtn.click()
+          // 行指纹：用于判断翻页后表格内容是否真正变化
+          function rowsKey(rows) {
+            return rows.map(r => r.model + '|' + r.input + '|' + r.output).join(';')
+          }
+
+          // 去重写入：同模型同 input/output 的行只计一次
+          function pushUnique(rows) {
+            let added = 0
+            for (const r of rows) {
+              const key = r.model + '|' + r.input + '|' + r.output
+              if (seen.has(key)) continue
+              seen.add(key)
+              allRows.push(r)
+              added++
+            }
+            return added
+          }
+
+          // 点击"下一页"：优先使用页面分页容器中的下一个按钮（XPath），回退 Ant Design 选择器
+          function clickNext() {
+            let btn = null
+            try {
+              btn = document.evaluate(
+                '/html/body/div/div[3]/div/div/main/div/div/div[5]/button[2]',
+                document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null
+              ).singleNodeValue
+            } catch (e) { btn = null }
+            if (!btn) {
+              btn = document.querySelector(
+                'li.ant-pagination-next:not(.ant-pagination-disabled) button,' +
+                'li[class*="next"]:not([class*="disabled"]) button,' +
+                'button[aria-label="Next Page"]:not([disabled]),' +
+                '.ant-pagination-next:not(.ant-pagination-disabled) a'
+              )
+            }
+            if (!btn) return false
+            // 最后一页检测：按钮禁用或父级带 disabled 类
+            const parent = btn.closest('li') || btn.parentElement
+            const isDisabled = btn.disabled ||
+              btn.getAttribute('aria-disabled') === 'true' ||
+              (parent && /disabled/i.test(parent.className || ''))
+            if (isDisabled) return false
+            btn.click()
             return true
           }
 
           // 解析第一页
-          allResults.push(...parseCurrentPage())
+          let prevRows = parseCurrentPage()
+          pushUnique(prevRows)
+          let prevKey = rowsKey(prevRows)
 
-          // 翻页解析后续页
-          for (let page = 1; page < 50; page++) {
-            if (!goNextPage()) break
-            await new Promise(r => setTimeout(r, 1500)) // 等待表格刷新
-            const pageData = parseCurrentPage()
-            if (pageData.length === 0) break // 空页，停止
-            allResults.push(...pageData)
+          // 翻页解析后续页，直至最后一页（最多 200 页防死循环）
+          for (let page = 1; page < 200; page++) {
+            if (!clickNext()) break // 无下一页按钮或已到最后一页
+
+            // 等待表格内容真正变化（最长等待 10 秒，避免页面刷新慢时误判为"未翻页"）
+            let rows = null
+            for (let i = 0; i < 20; i++) {
+              await new Promise(r => setTimeout(r, 500))
+              const candidate = parseCurrentPage()
+              const key = rowsKey(candidate)
+              if (key && key !== prevKey) {
+                rows = candidate
+                prevKey = key
+                break
+              }
+            }
+            if (!rows) break // 内容始终未变化 → 已到最后一页或翻页失败，停止
+            pushUnique(rows)
           }
 
-          return JSON.stringify({ models: allResults })
+          return JSON.stringify({ models: allRows })
         })()
       `)
 
