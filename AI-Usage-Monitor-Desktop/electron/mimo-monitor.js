@@ -14,8 +14,23 @@ const { BrowserWindow, session } = require('electron')
 // MIMO 控制台余额页地址
 const MIMO_BALANCE_URL = 'https://platform.xiaomimimo.com/console/balance'
 
+// MIMO 控制台用量页地址
+const MIMO_USAGE_URL = 'https://platform.xiaomimimo.com/console/usage'
+
 // 余额元素 XPath（用户提供）：/html/body/div/div/div/div/main/div/div/div/div/div/div[1]/div[2]/div/div[1]/div/div[1]/p
 const MIMO_BALANCE_XPATH = '/html/body/div/div/div/div/main/div/div/div/div/div/div[1]/div[2]/div/div[1]/div/div[1]/p'
+
+// 用量页切换按钮 XPath（用户提供）：点击后进入"模型-天"视图
+const MIMO_USAGE_TOGGLE_XPATH = '/html/body/div/div/div/div/main/div/div/div/div/div/div[2]/div[1]/div/div[1]/div[3]/div/div[2]/div[2]/label[2]'
+
+// 用量页数据容器 XPath（用户提供）：包含各模型的用量记录
+const MIMO_USAGE_CONTAINER_XPATH = '/html/body/div/div/div/div/main/div/div/div/div/div/div[2]/div[2]'
+
+// 用量页表格 XPath（用户提供）：Token 用量数据在 th[8]（第 9 列）下
+const MIMO_USAGE_TABLE_XPATH = '/html/body/div/div/div/div/main/div/div/div/div/div/div[2]/div[2]/div[3]/div/div/div/div/div/div/div/div/div/table'
+
+// 用量表格中 Token 用量列的固定列号（0 基，对应 thead 中第 9 个 th）
+const MIMO_USAGE_TOKEN_COLUMN = 8
 
 /** 页面加载/刷新超时（毫秒） */
 const PAGE_LOAD_TIMEOUT = 30000
@@ -140,6 +155,50 @@ class MimoMonitor {
     }
   }
 
+  /**
+   * 仅刷新余额（不触发用量页解析），供30秒轮询调用。
+   * @returns {boolean} true=余额刷新成功
+   */
+  async refreshBalanceOnly() {
+    if (this._refreshing || this._isUserLoggingIn) return false
+    if (!this.monitorWindow || this.monitorWindow.isDestroyed()) return false
+    if (this.monitorWindow.isVisible()) return false
+
+    this._refreshing = true
+    try {
+      this._navVersion++
+      const myVersion = this._navVersion
+
+      return await new Promise((resolve) => {
+        const settleTimer = setTimeout(async () => {
+          try {
+            const url = this.monitorWindow.webContents.getURL()
+            if (url.includes('/console/balance')) {
+              await this._parseBalancePage(myVersion)
+              resolve(true)
+            } else {
+              this.monitorWindow.webContents.once('did-finish-load', () => {
+                this.handlePageLoaded(myVersion)
+              })
+              this.monitorWindow.webContents.loadURL(MIMO_BALANCE_URL)
+              resolve(true)
+            }
+          } catch { resolve(false) }
+        }, 1500)
+
+        this._pageLoadTimeout = setTimeout(() => {
+          clearTimeout(settleTimer)
+          resolve(false)
+        }, PAGE_LOAD_TIMEOUT)
+      })
+    } catch (e) {
+      console.error(`[MimoMonitor:${this.vendorId}] 余额刷新异常:`, e.message)
+      return false
+    } finally {
+      this._refreshing = false
+    }
+  }
+
   // ===================== 页面加载处理 =====================
 
   async handlePageLoaded(navVersion) {
@@ -189,19 +248,32 @@ class MimoMonitor {
       return
     }
 
-    // 检测是否在正确的余额页
-    if (!url.includes('/console/balance')) {
-      console.log(`[MimoMonitor:${this.vendorId}] 页面不是余额页，尝试导航...`)
-      await this.monitorWindow.loadURL(MIMO_BALANCE_URL)
+    // 按 URL 路由到对应监控页
+    if (url.includes('/console/balance')) {
+      await this._parseBalancePage(navVersion)
+      return
+    }
+    if (url.includes('/console/usage')) {
+      await this._parseUsagePage(navVersion)
       return
     }
 
+    // 其他页面（登录跳转中间态等）→ 导航到余额页开始
+    console.log(`[MimoMonitor:${this.vendorId}] 页面不是监控页，尝试导航...`)
+    await this.monitorWindow.loadURL(MIMO_BALANCE_URL)
+  }
+
+  /** 解析余额页（余额 → 继续导航用量页） */
+  async _parseBalancePage(navVersion) {
+    if (!this.monitorWindow || this.monitorWindow.isDestroyed()) return
     this._clearLoadTimeout()
 
     // 等待 DOM 渲染稳定
     await new Promise(resolve => setTimeout(resolve, DOM_SETTLE_DELAY))
     // 等待后再次校验导航版本（可能已被新 reload 取代）
     if (navVersion !== undefined && navVersion !== this._navVersion) return
+
+    const url = this.monitorWindow.webContents.getURL()
 
     // 解析余额元素（用户指定的 XPath）
     try {
@@ -245,24 +317,287 @@ class MimoMonitor {
             data
           })
         }
-
-        // 解析成功后关闭窗口，释放资源（下次刷新时按需重建）
-        if (this.monitorWindow && !this.monitorWindow.isDestroyed()) {
-          try {
-            const s = session.fromPartition(this.partition)
-            if (s && typeof s.flushStorageData === 'function') s.flushStorageData()
-          } catch { /* 忽略 */ }
-          this._destroying = true
-          this.monitorWindow.destroy()
-          this.monitorWindow = null
-          this._destroying = false
-          console.log(`[MimoMonitor:${this.vendorId}] 解析完成，窗口已关闭`)
-        }
       } else {
         console.warn(`[MimoMonitor:${this.vendorId}] 未解析到余额元素（页面结构可能变化或尚未登录）`)
       }
     } catch (e) {
       console.error(`[MimoMonitor:${this.vendorId}] 余额解析失败:`, e.message)
+    }
+
+    // 无论余额解析是否成功，继续解析用量页（两页共用一次窗口，减少开销）
+    try {
+      await this.monitorWindow.loadURL(MIMO_USAGE_URL)
+    } catch (e) {
+      console.error(`[MimoMonitor:${this.vendorId}] 导航到用量页失败:`, e.message)
+      this._destroyWindowAfterParse()
+    }
+  }
+
+  /** 解析用量页（点击切换按钮 → 提取模型-天用量数据） */
+  async _parseUsagePage(navVersion) {
+    if (!this.monitorWindow || this.monitorWindow.isDestroyed()) return
+    this._clearLoadTimeout()
+
+    // 等待 DOM 渲染稳定
+    await new Promise(resolve => setTimeout(resolve, DOM_SETTLE_DELAY))
+    // 等待后再次校验导航版本
+    if (navVersion !== undefined && navVersion !== this._navVersion) return
+
+    const url = this.monitorWindow.webContents.getURL()
+
+    try {
+      // 1. 点击切换按钮（若已激活则跳过，避免来回切换）
+      const clickResult = await this.monitorWindow.webContents.executeJavaScript(`
+        (function() {
+          var label = null;
+          try {
+            label = document.evaluate(
+              ${JSON.stringify(MIMO_USAGE_TOGGLE_XPATH)},
+              document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null
+            ).singleNodeValue;
+          } catch (e) { label = null; }
+          if (!label) return 'not-found';
+          var input = label.querySelector('input');
+          var active = /active|checked|selected/i.test(label.className || '') ||
+            label.getAttribute('aria-checked') === 'true' ||
+            (input && input.checked);
+          if (active) return 'already-active';
+          label.click();
+          return 'clicked';
+        })()
+      `)
+      console.log(`[MimoMonitor:${this.vendorId}] 用量页切换按钮: ${clickResult}`)
+
+      // 2. 等待切换后数据刷新
+      await new Promise(resolve => setTimeout(resolve, 2000))
+      if (navVersion !== undefined && navVersion !== this._navVersion) return
+
+      // 3. 解析容器中的模型-天数据
+      const raw = await this.monitorWindow.webContents.executeJavaScript(`
+        (async () => {
+          const container = document.evaluate(
+            ${JSON.stringify(MIMO_USAGE_CONTAINER_XPATH)},
+            document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null
+          ).singleNodeValue;
+          if (!container) return JSON.stringify({ ok: false, reason: 'container-not-found' });
+
+          // 解析 token 数值：支持 30万 / 7.5万 / 1.2M / 3,000 / 5000 / 12.3亿
+          function parseTokens(str) {
+            var clean = String(str).replace(/[,，\\s]/g, '');
+            var m = clean.match(/(\\d+(?:\\.\\d+)?)\\s*([万亿wWkKmM])?/i);
+            if (!m) return null;
+            var n = parseFloat(m[1]);
+            var unit = (m[2] || '').toLowerCase();
+            if (unit === '万' || unit === 'w') n *= 10000;
+            else if (unit === '亿' || unit === 'y') n *= 100000000;
+            else if (unit === 'k') n *= 1000;
+            else if (unit === 'm') n *= 1000000;
+            return Math.round(n);
+          }
+
+          // 从整段文本中选出最可能的 Token 数值：
+          // 优先"带单位或紧邻 token 关键字"的数（如 30万 / 335466Token），其次取最大值（排除模型名中的版本号如 v2.5）
+          function extractTokenCount(text) {
+            var clean = String(text).replace(/[,，\\s]/g, '');
+            var regex = /(\\d+(?:\\.\\d+)?)\\s*([万亿wWkKmM])?\\s*(?:token|tokens)?/gi;
+            var best = null;
+            var m;
+            while ((m = regex.exec(clean)) !== null) {
+              if (!m[1]) continue;
+              var n = parseTokens(m[0]);
+              if (n === null || n <= 0) continue;
+              var score = 0;
+              if (/token/i.test(m[0])) score += 100;   // 紧邻 token 关键字
+              if (m[2]) score += 10;                    // 带 万/K/M 单位
+              score += n / 1000000;                     // 数值大的更可能是用量
+              if (!best || score > best.score) best = { n: n, raw: m[0], score: score };
+            }
+            return best;
+          }
+
+          // 模型名校验：过滤页面上的聚合行/统计标签/说明文字
+          function isValidModelName(name) {
+            if (!name) return false;
+            if (name.length > 40) return false;
+            if (!/[a-zA-Z0-9]/.test(name)) return false; // 必须含字母或数字（v2.5 / mimo-v3）
+            if (/总消耗|总体消费|总用量|单模型|模型消费|消费总金额|请求次数|插件调用|调用次数|暂无数据|日期为|UTC|小计|合计|共\\s*\\d+|条记录|下一页|上一页|加载中|今日|昨日/.test(name)) return false;
+            // 名称中不应再出现带单位的数值（如 "v2.5v37万" 这类拼接残留）
+            if (/(\\d+(?:\\.\\d+)?)\\s*[万亿wWkKmM]/i.test(name)) return false;
+            // 拒绝"纯数字 + 单个字母"的拼接残留（如 42096136s —— 数值被误当模型名）
+            if (/^\\d+[a-zA-Z]$/.test(name)) return false;
+            // 拒绝纯数字的"模型名"（如 42096136 —— token 数值被读进模型名列）
+            if (/^\\d+$/.test(name)) return false;
+            // 拒绝纯日期（如 2026-08-03 / 8-3）
+            if (/^\\d{4}[-/年]\\d{1,2}[-/月]\\d{1,2}$/.test(name)) return false;
+            if (/^\\d{1,2}[-/]\\d{1,2}$/.test(name)) return false;
+            return true;
+          }
+
+          // 判断一个叶子元素是否承载"用量数值"（排除模型名里的版本号）
+          function isCountCarrier(text) {
+            var clean = String(text).replace(/[,，\\s]/g, '');
+            var m = clean.match(/(\\d+(?:\\.\\d+)?)\\s*([万亿wWkKmM])?\\s*(?:token|tokens)?/i);
+            if (!m) return false;
+            if (m[2]) return true;                       // 带单位
+            if (/token/i.test(m[0])) return true;        // 带 token 关键字
+            var idx = clean.indexOf(m[1]);
+            if (idx > 0 && /[a-zA-Z]/.test(clean[idx - 1])) return false; // 数字紧跟字母 → 版本号/模型名一部分
+            return true;
+          }
+
+          var models = {};
+          var rowKeys = new Set();
+
+          // ===== 方案 A：表格 =====
+          // 优先使用用户指定的精确表格 XPath（Token 用量在 th[8] 列）
+          var exactTable = null;
+          try {
+            exactTable = document.evaluate(
+              ${JSON.stringify(MIMO_USAGE_TABLE_XPATH)},
+              document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null
+            ).singleNodeValue;
+          } catch (e) { exactTable = null; }
+
+          var tables = [];
+          if (exactTable) tables.push(exactTable);
+          else tables = Array.from(container.querySelectorAll('table'));
+
+          var tableHit = false;
+          for (var ti = 0; ti < tables.length; ti++) {
+            var table = tables[ti];
+            var headerCells = table.querySelectorAll('thead th, thead td');
+            if (headerCells.length === 0) {
+              var firstRow = table.querySelector('tr');
+              if (firstRow) headerCells = firstRow.querySelectorAll('th, td');
+            }
+            if (headerCells.length < 2) continue;
+            var nameIdx = -1, tokenIdx = -1;
+            for (var hi = 0; hi < headerCells.length; hi++) {
+              var htext = (headerCells[hi].textContent || '').trim().toLowerCase();
+              if (/模型|model|名称|name/.test(htext)) nameIdx = hi;
+              if (/token|tokens|用量|消耗|使用/.test(htext)) tokenIdx = hi;
+            }
+            if (ti === 0 && exactTable && headerCells.length > ${JSON.stringify(MIMO_USAGE_TOKEN_COLUMN)}) {
+              // 精确表格：Token 列固定为 th[8]（用户指定），避免关键字误匹配到输入/输出等列
+              tokenIdx = ${JSON.stringify(MIMO_USAGE_TOKEN_COLUMN)};
+              if (nameIdx === -1) nameIdx = 1; // 模型名列未识别时假设为第 2 列
+            } else if (tokenIdx === -1 && headerCells.length > ${JSON.stringify(MIMO_USAGE_TOKEN_COLUMN)}) {
+              // 其他表格：表头关键字未命中但列数充足时，同样按固定列兜底
+              tokenIdx = ${JSON.stringify(MIMO_USAGE_TOKEN_COLUMN)};
+              if (nameIdx === -1) nameIdx = 1;
+            }
+            if (tokenIdx === -1) continue;
+            var dataRows = table.querySelectorAll('tbody tr');
+            if (dataRows.length === 0) dataRows = Array.from(table.querySelectorAll('tr')).slice(1);
+            for (var ri = 0; ri < dataRows.length; ri++) {
+              var cells = dataRows[ri].querySelectorAll('td');
+              if (nameIdx >= 0 && cells.length <= Math.max(nameIdx, tokenIdx)) continue;
+              var name = nameIdx >= 0 ? (cells[nameIdx]?.textContent || '').trim() : '';
+              var tokens = parseTokens(nameIdx >= 0 ? (cells[tokenIdx]?.textContent || '') : (dataRows[ri].textContent || ''));
+              if (!tokens || tokens <= 0) continue;
+              if (!name || !isValidModelName(name)) {
+                // 模型名列未识别/无效：遍历本行其他单元格寻找合法模型名
+                var foundName = null;
+                for (var ci = 0; ci < cells.length; ci++) {
+                  if (ci === tokenIdx) continue;
+                  var cn = (cells[ci]?.textContent || '').trim();
+                  if (cn && isValidModelName(cn)) { foundName = cn; break; }
+                }
+                if (!foundName) continue;
+                name = foundName;
+              }
+              var key = 'row:' + name;
+              if (rowKeys.has(key)) continue;
+              rowKeys.add(key);
+              models[name] = (models[name] || 0) + tokens;
+              tableHit = true;
+            }
+          }
+
+          // ===== 方案 B：非表格行（卡片/列表） =====
+          if (!tableHit || Object.keys(models).length === 0) {
+            // 从数值叶子元素向上找最近的合格"行"（包含模型名 + 用量）
+            function findRowRecord(el) {
+              var cur = el;
+              while (cur && cur !== container) {
+                var text = (cur.textContent || '').trim();
+                if (text && text.length <= 80) {
+                  var tk = extractTokenCount(text);
+                  if (tk) {
+                    var name = text.replace(tk.raw, '').replace(/[,，\\s]/g, '').replace(/token|tokens/gi, '').replace(/[:：]/g, '').trim();
+                    if (isValidModelName(name)) return { name: name, num: tk.n };
+                  }
+                }
+                cur = cur.parentElement;
+              }
+              return null;
+            }
+
+            var all = container.querySelectorAll('*');
+            for (var ei = 0; ei < all.length; ei++) {
+              var el = all[ei];
+              var text = (el.textContent || '').trim();
+              if (!text || text.length > 80) continue;
+              if (!isCountCarrier(text)) continue;
+              var rec = findRowRecord(el);
+              if (!rec) continue;
+              var rk = 'el:' + rec.name;
+              if (rowKeys.has(rk)) continue;
+              rowKeys.add(rk);
+              models[rec.name] = (models[rec.name] || 0) + rec.num;
+            }
+          }
+
+          var result = Object.entries(models).map(function (e) { return { name: e[0], tokens: e[1] }; });
+          return JSON.stringify({ ok: true, models: result });
+        })()
+      `)
+      if (navVersion !== undefined && navVersion !== this._navVersion) return
+      const result = raw ? JSON.parse(raw) : null
+
+      if (result && result.ok !== false) {
+        const models = result.models || []
+        const wasLoggedIn = this._isLoggedIn
+        this._isLoggedIn = true
+        this._isUserLoggingIn = false  // 解析成功说明已登录
+        if (!wasLoggedIn && this.onLoginStatusChanged) {
+          this.onLoginStatusChanged(this.vendorId, true)
+        }
+        const total = models.reduce((s, m) => s + (m.tokens || 0), 0)
+        console.log(`[MimoMonitor:${this.vendorId}] 解析到 ${models.length} 个模型的用量，总 Tokens: ${total}`)
+
+        if (this._callback) {
+          this._callback({
+            type: 'mimo-dom-parsed',
+            url,
+            timestamp: new Date().toISOString(),
+            vendorId: this.vendorId,
+            data: { models }
+          })
+        }
+      } else {
+        console.warn(`[MimoMonitor:${this.vendorId}] 用量解析失败: ${(result && result.reason) || '未知原因'}（页面结构可能变化）`)
+      }
+    } catch (e) {
+      console.error(`[MimoMonitor:${this.vendorId}] 用量页解析失败:`, e.message)
+    }
+
+    // 解析完成，关闭窗口释放资源（下次刷新时按需重建）
+    this._destroyWindowAfterParse()
+  }
+
+  /** 销毁监控窗口（保留持久化 session） */
+  _destroyWindowAfterParse() {
+    if (this.monitorWindow && !this.monitorWindow.isDestroyed()) {
+      try {
+        const s = session.fromPartition(this.partition)
+        if (s && typeof s.flushStorageData === 'function') s.flushStorageData()
+      } catch { /* 忽略 */ }
+      this._destroying = true
+      this.monitorWindow.destroy()
+      this.monitorWindow = null
+      this._destroying = false
+      console.log(`[MimoMonitor:${this.vendorId}] 解析完成，窗口已关闭`)
     }
   }
 

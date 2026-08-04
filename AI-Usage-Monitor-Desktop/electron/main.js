@@ -6,8 +6,27 @@ const { spawn } = require('child_process')
 const { DeepSeekMonitor } = require('./deepseek-monitor')
 const { KimiMonitor } = require('./kimi-monitor')
 const MimoMonitor = require('./mimo-monitor')
-const { collectAll, recordTokenUsage, getTokenStats, resetDeepSeekBudget, resetMimoBudget, flushTokenStats, loadTokenStats, recordHourlySnapshot, getPrevModelTokens } = require('./usage-collector')
+const { collectAll, recordTokenUsage, getTokenStats, resetDeepSeekBudget, resetMimoBudget, flushTokenStats, loadTokenStats, reloadTokenStats, recordHourlySnapshot, getPrevModelTokens } = require('./usage-collector')
 const Scheduler = require('./scheduler')
+
+// ===== 模型名校验 =====
+// DOM/表格解析出的模型名可能混入错误内容（如 42096136s / 42096136 / undefined），
+// 这些"模型"不是真实模型，记录前统一过滤，避免污染统计数据。
+const INVALID_MODEL_NAME_PATTERNS = [
+  /error/i, /fail/i, /invalid/i, /undefined/i, /null/i,
+  /^[\s\-_]+$/,               // 纯空白或特殊字符
+  /<[^>]+>/,                  // HTML 标签
+  /^\d+$/,                    // 纯数字（token 数值被读成模型名）
+  /^\d+[a-zA-Z]$/,            // 数字+单个字母拼接残留（42096136s）
+  /总消耗|总体消费|总用量|单模型|模型消费|消费总金额|请求次数|插件调用|调用次数|暂无数据|小计|合计|条记录|下一页|上一页|加载中|今日|昨日|日期为|UTC/
+]
+
+function isValidModelName(name) {
+  if (!name || typeof name !== 'string') return false
+  if (name.length > 40) return false
+  if (!/[a-zA-Z0-9]/.test(name)) return false
+  return !INVALID_MODEL_NAME_PATTERNS.some(p => p.test(name))
+}
 
 // ===== 语义化版本比较工具 =====
 // 解析 "v1.2.3" / "1.2.3" / "1.2.3-beta.1" 等版本号
@@ -266,6 +285,13 @@ app.whenReady().then(() => {
   })
   scheduler.startBalancePolling()
   scheduler.startPageRefreshPolling()
+
+  // MIMO 余额30秒轮询（与 DeepSeek/Kimi 保持一致）
+  setInterval(() => {
+    for (const [, monitor] of mimoMonitors) {
+      monitor.refreshBalanceOnly().catch(() => {})
+    }
+  }, 30000)
 
   ipcMain.on('window-minimize', (event) => {
     BrowserWindow.fromWebContents(event.sender)?.minimize()
@@ -652,6 +678,11 @@ app.whenReady().then(() => {
         let hasNewData = false
         for (const model of data.models) {
           if (model.tokens > 0) {
+            // 过滤解析产生的无效模型名（如 42096136s / undefined）
+            if (!isValidModelName(model.name)) {
+              console.log(`[Main]   忽略无效模型名: ${JSON.stringify(model.name)}`)
+              continue
+            }
             // 计算增量：当前累计值 - 上次快照累计值
             // 注意：平台展示的是"近30天滚动总量"，跨月/多天未运行后窗口滑动
             // 会导致当前值小于上次基线（delta 为负）——此时应跳过本次记录，
@@ -705,6 +736,11 @@ app.whenReady().then(() => {
       const prevTokensMap = getPrevModelTokens(payload.vendorId)
       for (const model of data.models) {
         if (model.tokens > 0) {
+          // 过滤解析产生的无效模型名
+          if (!isValidModelName(model.name)) {
+            console.log(`[Main]   忽略无效模型名: ${JSON.stringify(model.name)}`)
+            continue
+          }
           const prev = prevTokensMap[model.name] || 0
           const delta = Math.max(0, model.tokens - prev)
           if (delta === 0) {
@@ -736,11 +772,54 @@ app.whenReady().then(() => {
     }
   }
 
-  // MIMO 监听器数据回调：DOM/XPath 解析的余额数据 → 写入缓存并推送前端
+  // MIMO 监听器数据回调：DOM/XPath 解析的余额与用量数据 → 写入缓存并推送前端
   const mimoMonitorCallback = (payload) => {
     console.log(`[Main] MIMO 监听器收到数据: ${payload.type} from ${payload.url}`)
 
     const data = payload.data
+
+    // mimo-dom-parsed: DOM 解析的各模型 Token 用量（模型-天，点击切换按钮后的视图）
+    if (data && data.models && Array.isArray(data.models)) {
+      let hasNewData = false
+      const prevTokensMap = getPrevModelTokens(payload.vendorId)
+      for (const model of data.models) {
+        if (model.tokens > 0) {
+          // 过滤解析产生的无效模型名（如 42096136s —— MIMO 表格列错位残留）
+          if (!isValidModelName(model.name)) {
+            console.log(`[Main]   忽略无效模型名: ${JSON.stringify(model.name)}`)
+            continue
+          }
+          // 计算增量：当前累计值 - 上次快照累计值（与 DeepSeek/Kimi 一致）
+          // 跨天/切换日期后当前值回落时（delta 为负）跳过，快照会成为新基线
+          const prev = prevTokensMap[model.name] || 0
+          const delta = Math.max(0, model.tokens - prev)
+          if (delta === 0) {
+            console.log(`[Main]   ${model.name}: 无增量 (${model.tokens} <= 上次 ${prev})`)
+            continue
+          }
+          const record = {
+            model: model.name || 'unknown',
+            requestId: '',
+            promptTokens: 0,
+            completionTokens: 0,
+            totalTokens: delta,
+            timestamp: payload.timestamp,
+            vendorId: payload.vendorId
+          }
+          recordTokenUsage(record)
+          hasNewData = true
+          console.log(`[Main]   ${model.name}: +${delta} tokens (累计 ${model.tokens})`)
+        }
+      }
+      // 记录快照，供下次增量计算用（与 Kimi 一致）
+      const totalTokens = data.models.reduce((sum, m) => sum + (m.tokens || 0), 0)
+      recordHourlySnapshot({ models: data.models, totalTokens }, payload.vendorId)
+
+      if (hasNewData) {
+        mainWindow?.webContents.send('token-stats-updated', getTokenStats())
+      }
+      return
+    }
 
     // mimo-balance: XPath 解析的账户余额
     if (payload.type === 'mimo-balance' && data && typeof data.balance === 'number') {
@@ -801,7 +880,22 @@ app.whenReady().then(() => {
   ipcMain.handle('unified-refresh', async () => {
     try {
       const result = await scheduler.manualRefresh()
+      // 外部可能清理/修改过 token 统计数据文件，强制重新加载并推送最新统计，
+      // 保证柱状图等图表立即反映磁盘上的最新数据
+      const stats = reloadTokenStats()
+      mainWindow?.webContents.send('token-stats-updated', stats)
       return { success: true, ...result }
+    } catch (e) {
+      return { success: false, error: e.message }
+    }
+  })
+
+  // 重新加载 Token 统计数据（从磁盘），供手动清理数据后立即刷新图表
+  ipcMain.handle('reload-token-stats', () => {
+    try {
+      const stats = reloadTokenStats()
+      mainWindow?.webContents.send('token-stats-updated', stats)
+      return { success: true, stats }
     } catch (e) {
       return { success: false, error: e.message }
     }

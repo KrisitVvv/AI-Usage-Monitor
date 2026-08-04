@@ -32,6 +32,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // ---------- Token 用量统计 ----------
   getTokenStats: () => ipcRenderer.invoke('get-token-stats'),
+  reloadTokenStats: () => ipcRenderer.invoke('reload-token-stats'),
   onTokenStatsUpdated: (callback) => {
     const handler = (_event, data) => callback(data)
     ipcRenderer.on('token-stats-updated', handler)

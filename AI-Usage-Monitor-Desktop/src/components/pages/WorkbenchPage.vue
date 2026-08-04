@@ -23,8 +23,8 @@ const tokenStats = ref({
   dailySummary: []
 })
 
-// Token 统计错误状态
-const tokenStatsError = ref('')
+// Token 统计错误状态（已禁用显示，保留用于调试）
+// const tokenStatsError = ref('')
 
 const manualRefreshing = ref(false)
 
@@ -96,7 +96,23 @@ function getVendorName(model) {
 }
 
 function modelColorFn(model) {
-  return MODEL_COLORS[model] || MODEL_COLORS.default
+  const known = MODEL_COLORS[model]
+  if (known) return known
+  const lower = (model || '').toLowerCase()
+  // 用名称哈希在品牌色相范围内生成变体：同品牌不同模型颜色各异但色调统一
+  function brandHash(m, hueBase, hueRange) {
+    let h = 0
+    for (let i = 0; i < m.length; i++) h = ((h << 5) - h) + m.charCodeAt(i)
+    const hue = (hueBase + (Math.abs(h) % hueRange)) % 360
+    return `hsl(${hue}, 68%, 52%)`
+  }
+  if (lower.includes('deepseek')) return brandHash(model, 210, 30)      // 蓝色系 210-240
+  if (lower.includes('kimi') || lower.includes('moonshot')) return brandHash(model, 265, 30) // 紫色系 265-295
+  if (lower.includes('mimo') || lower.includes('xiaomi')) return brandHash(model, 18, 30)    // 橙色系 18-48
+  // 完全未知的模型：全色相范围
+  let hash = 0
+  for (let i = 0; i < model.length; i++) hash = ((hash << 5) - hash) + model.charCodeAt(i)
+  return `hsl(${Math.abs(hash) % 360}, 68%, 52%)`
 }
 
 // Token 数值格式化（缩写：K/W/M/B）
@@ -132,11 +148,57 @@ const formatTokenDisplay = (value) => {
 const tokenChartRef = ref(null)
 let tokenChartInstance = null
 
+// 过滤无效的模型名和 Token 数据
+function filterValidTokenData(data) {
+  if (!data || typeof data !== 'object') return data
+  
+  // 过滤掉无效的模型名（包含错误信息、空值、异常字符等）
+  const invalidPatterns = [
+    /error/i, /fail/i, /invalid/i, /undefined/i,
+    /^[\s\-_]+$/, // 纯空白或特殊字符
+    /<[^>]+>/, // HTML 标签
+  ]
+  
+  const filtered = {}
+  for (const [key, value] of Object.entries(data)) {
+    // 跳过空 key 或非数字 value
+    if (!key || typeof value !== 'number') continue
+    
+    // 检查 key 是否匹配错误模式
+    const isError = invalidPatterns.some(pattern => pattern.test(key))
+    if (isError) continue
+    
+    // 跳过负数和异常大的值（超过 1 万亿视为异常）
+    if (value < 0 || value > 1e12) continue
+    
+    filtered[key] = value
+  }
+  return filtered
+}
+
+// 过滤 hourlyDeltas 中的无效数据
+function filterHourlyDeltas(deltas) {
+  if (!Array.isArray(deltas)) return []
+  return deltas.map(d => ({
+    ...d,
+    models: filterValidTokenData(d.models)
+  }))
+}
+
+// 过滤 dailySummary 中的无效数据
+function filterDailySummary(summary) {
+  if (!Array.isArray(summary)) return []
+  return summary.map(d => ({
+    ...d,
+    models: filterValidTokenData(d.models)
+  }))
+}
+
 // 构建柱状图数据（按时间粒度分段）
 function buildChartData() {
   const range = timeRange.value
-  const hourlyDeltas = tokenStats.value.hourlyDeltas || []
-  const dailySummary = tokenStats.value.dailySummary || []
+  const hourlyDeltas = filterHourlyDeltas(tokenStats.value.hourlyDeltas || [])
+  const dailySummary = filterDailySummary(tokenStats.value.dailySummary || [])
   const vid = selectedVendorId.value
 
   // 根据是否选中特定 vendor 决定数据源
@@ -146,15 +208,15 @@ function buildChartData() {
   if (vid === 'all') {
     const usage = tokenStats.value.modelUsage || {}
     allModels = tokenStats.value.models || []
-    currentUsage = usage[range] || {}
+    currentUsage = filterValidTokenData(usage[range] || {})
   } else {
     // 按 vendor 筛选：从 vendorModelUsage 中获取该 vendor 的模型列表
-    vendorModels = tokenStats.value.vendorModelUsage?.[range]?.[vid] || {}
+    vendorModels = filterValidTokenData(tokenStats.value.vendorModelUsage?.[range]?.[vid] || {})
     // 若当前粒度无模型名，从其他粒度回退获取（当日可能仅快照有数据）
     if (Object.keys(vendorModels).length === 0) {
       for (const fb of ['today', 'week', 'month', 'year']) {
         if (fb === range) continue
-        const fbData = tokenStats.value.vendorModelUsage?.[fb]?.[vid]
+        const fbData = filterValidTokenData(tokenStats.value.vendorModelUsage?.[fb]?.[vid] || {})
         if (fbData && Object.keys(fbData).length > 0) {
           vendorModels = fbData
           break
@@ -166,7 +228,19 @@ function buildChartData() {
   }
 
   const models = allModels.length > 0 ? allModels : Object.keys(currentUsage)
-  if (models.length === 0) {
+  
+  // 过滤掉无效的模型名
+  const invalidPatterns = [
+    /error/i, /fail/i, /invalid/i, /undefined/i,
+    /^[\s\-_]+$/, // 纯空白或特殊字符
+    /<[^>]+>/, // HTML 标签
+  ]
+  const validModels = models.filter(m => {
+    if (!m || typeof m !== 'string') return false
+    return !invalidPatterns.some(pattern => pattern.test(m))
+  })
+  
+  if (validModels.length === 0) {
     return { xData: ['暂无数据'], series: [], hasData: false }
   }
 
@@ -248,7 +322,7 @@ function buildChartData() {
     return { xData: ['暂无数据'], series: [], hasData: false }
   }
 
-  const series = models.map(m => ({
+  const series = validModels.map(m => ({
     name: m,
     rawName: m,
     data: buckets.map(b => Math.max(b.models[m] || 0, 0))
@@ -273,12 +347,12 @@ const totalTokens = computed(() => {
   }
 
   // 按 vendor 筛选：从 vendorModelUsage 中汇总该 vendor 的模型用量
-  const vUsage = tokenStats.value.vendorModelUsage?.[range]?.[vid] || {}
+  const vUsage = filterValidTokenData(tokenStats.value.vendorModelUsage?.[range]?.[vid] || {})
   const total = Object.values(vUsage).reduce((s, v) => s + v, 0)
 
   // 今日粒度下，若 vendorModelUsage 值为 0 但模型 key 存在，则从 hourlyDeltas 聚合（数据源对齐）
   if (range === 'today' && total === 0 && Object.keys(vUsage).length > 0) {
-    const hourlyDeltas = tokenStats.value.hourlyDeltas || []
+    const hourlyDeltas = filterHourlyDeltas(tokenStats.value.hourlyDeltas || [])
     let aggregated = 0
     for (const d of hourlyDeltas) {
       for (const [m, t] of Object.entries(d.models || {})) {
@@ -297,21 +371,21 @@ const top3Tokens = computed(() => {
   const vid = selectedVendorId.value
   let usage
   if (vid === 'all') {
-    usage = tokenStats.value.modelUsage?.[range] || {}
+    usage = filterValidTokenData(tokenStats.value.modelUsage?.[range] || {})
   } else {
-    usage = tokenStats.value.vendorModelUsage?.[range]?.[vid] || {}
+    usage = filterValidTokenData(tokenStats.value.vendorModelUsage?.[range]?.[vid] || {})
     // 今日粒度下，若值为 0 但模型 key 存在，从 hourlyDeltas 获取真实值
     if (range === 'today') {
       const totalFromVUsage = Object.values(usage).reduce((s, v) => s + v, 0)
       if (totalFromVUsage === 0 && Object.keys(usage).length > 0) {
-        const hourlyDeltas = tokenStats.value.hourlyDeltas || []
+        const hourlyDeltas = filterHourlyDeltas(tokenStats.value.hourlyDeltas || [])
         const aggregated = {}
         for (const d of hourlyDeltas) {
           for (const [m, t] of Object.entries(d.models || {})) {
             if (m in usage) aggregated[m] = (aggregated[m] || 0) + t
           }
         }
-        usage = aggregated
+        usage = filterValidTokenData(aggregated)
       }
     }
   }
@@ -337,7 +411,7 @@ const selectedVendorName = computed(() => {
 const filterableVendors = computed(() => {
   return (vendors.value || []).filter(v => {
     const p = (v.provider || '').toLowerCase()
-    return p.includes('deepseek') || p.includes('kimi')
+    return p.includes('deepseek') || p.includes('kimi') || p.includes('mimo')
   })
 })
 
@@ -489,8 +563,8 @@ const updateTokenChart = () => {
         return `${header}<br/>${lines.join('<br/>')}`
       }
     },
-    legend: { orient: 'horizontal', bottom: '0%', left: 'center', icon: 'roundRect', itemWidth: 12, itemHeight: 10, itemGap: 16, textStyle: { color: '#64748b', fontSize: 11 }, data: seriesList.map(s => s.name) },
-    grid: { left: '8%', right: '5%', bottom: '18%', top: '6%' },
+    legend: { type: 'scroll', orient: 'horizontal', bottom: 0, left: 'center', right: '5%', icon: 'roundRect', itemWidth: 12, itemHeight: 10, itemGap: 16, pageIconSize: 10, pageIconColor: '#cbd5e1', pageIconInactiveColor: '#e2e8f0', pageTextStyle: { color: '#94a3b8', fontSize: 10 }, textStyle: { color: '#64748b', fontSize: 11 }, data: seriesList.map(s => s.name) },
+    grid: { left: '8%', right: '5%', bottom: 65, top: '6%' },
     xAxis: {
       type: 'category', data: chartData.xData,
       axisLine: { lineStyle: { color: '#cbd5e1' } },
@@ -545,12 +619,13 @@ onMounted(async () => {
       const stats = await window.electronAPI.getTokenStats()
       if (stats) {
         tokenStats.value = stats
-        tokenStatsError.value = ''
+        // tokenStatsError.value = '' // 已禁用
       } else {
-        tokenStatsError.value = 'Token 统计数据为空'
+        // tokenStatsError.value = 'Token 统计数据为空' // 已禁用
+        console.warn('[Workbench] Token 统计数据为空')
       }
     } catch (e) {
-      tokenStatsError.value = '加载 Token 统计失败: ' + (e.message || '未知错误')
+      // tokenStatsError.value = '加载 Token 统计失败: ' + (e.message || '未知错误') // 已禁用
       console.warn('[Workbench] 加载 token 统计失败:', e.message)
     }
 
@@ -572,7 +647,7 @@ onMounted(async () => {
     unsubscribeToken = window.electronAPI.onTokenStatsUpdated((data) => {
       if (data) {
         tokenStats.value = data
-        tokenStatsError.value = ''
+        // tokenStatsError.value = '' // 已禁用
       }
     })
 
@@ -583,7 +658,8 @@ onMounted(async () => {
       mimoBalances.value = data.mimoBalances || {}
     })
   } else {
-    tokenStatsError.value = '运行环境不支持（非 Electron）'
+    // tokenStatsError.value = '运行环境不支持（非 Electron）' // 已禁用
+    console.warn('[Workbench] 运行环境不支持（非 Electron）')
   }
 
   setTimeout(() => { loading.value = false }, 400)
@@ -605,11 +681,11 @@ onUnmounted(() => {
   <div class="workbench-page">
     <div class="dashboard-layout">
 
-      <!-- 错误通知 -->
-      <div v-if="tokenStatsError" class="error-notice">
+      <!-- 错误通知已禁用 -->
+      <!-- <div v-if="tokenStatsError" class="error-notice">
         <span class="error-notice-icon">&#9888;</span>
         <span class="error-notice-text">{{ tokenStatsError }}</span>
-      </div>
+      </div> -->
 
 
 

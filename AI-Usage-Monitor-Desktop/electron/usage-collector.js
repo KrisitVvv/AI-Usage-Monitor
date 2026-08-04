@@ -17,6 +17,17 @@ let writeTimer = null
 let pendingData = null
 let statsCache = null
 
+// 无效模型名模式：DOM/表格解析可能把 token 数值（42096136s / 42096136）或
+// 错误占位（undefined）误当模型名，记录前统一过滤
+const INVALID_MODEL_NAME_PATTERNS = [
+  /error/i, /fail/i, /invalid/i, /undefined/i, /null/i,
+  /^[\s\-_]+$/,               // 纯空白或特殊字符
+  /<[^>]+>/,                  // HTML 标签
+  /^\d+$/,                    // 纯数字（token 数值被读成模型名）
+  /^\d+[a-zA-Z]$/,            // 数字+单个字母拼接残留（42096136s）
+  /总消耗|总体消费|总用量|单模型|模型消费|消费总金额|请求次数|插件调用|调用次数|暂无数据|小计|合计|条记录|下一页|上一页|加载中|今日|昨日|日期为|UTC/
+]
+
 function getUserDataPath(filename) {
   return path.join(app.getPath('userData'), filename)
 }
@@ -95,6 +106,16 @@ function loadTokenStats() {
 }
 
 /**
+ * 强制从磁盘重新加载 Token 统计数据（丢弃内存缓存）。
+ * 用于外部清理/修改了 token-usage.json 后，让应用内图表立即反映最新数据，
+ * 同时避免后续写入把旧内存数据覆盖回磁盘。
+ */
+function reloadTokenStats() {
+  loadTokenStats()
+  return getTokenStats()
+}
+
+/**
  * 节流写入：高频调用时合并为一次实际磁盘写入
  */
 function throttledWriteTokenStats(data) {
@@ -143,6 +164,9 @@ function isValidRecord(record) {
   if (!record || typeof record !== 'object') return false
   if (typeof record.totalTokens !== 'number' || record.totalTokens < 0) return false
   if (typeof record.model !== 'string' || !record.model) return false
+  // 过滤解析产生的无效模型名（如 42096136s / 42096136 / undefined），
+  // 所有记录最终都经过此处，作为记录前的最后一道防线
+  if (INVALID_MODEL_NAME_PATTERNS.some(p => p.test(record.model))) return false
   return true
 }
 
@@ -434,18 +458,24 @@ function getPrevModelTokens(vendorId) {
 }
 
 /**
- * 从快照中提取各模型的最后累计值
+ * 从快照中提取各模型的最大累计值作为增量基线。
+ *
+ * 注意：取"最大值"而非"最后快照"——累计值本质单调递增，正常情况下最大值等于最后快照值；
+ * 但当最后一次快照不完整（某次解析只得到部分模型）时，最后快照会缺失部分模型，
+ * 导致这些模型的基线归零、下次解析时把相同累计值当作全新增量重复计数。
+ * 取最大值可抵御这种不完整快照带来的重复计数。
  */
 function mergeSnapshotModels(snapshots, vendorId) {
   const result = {}
   for (const [key, vendorSnap] of Object.entries(snapshots)) {
     if (!vendorSnap || typeof vendorSnap !== 'object') continue
     if (vendorId && key !== `vendor_${vendorId}`) continue
-    const hours = Object.keys(vendorSnap).sort()
-    if (hours.length === 0) continue
-    const last = vendorSnap[hours[hours.length - 1]]
-    for (const [name, data] of Object.entries(last.models || {})) {
-      result[name] = (result[name] || 0) + (data.tokens || 0)
+    for (const hourData of Object.values(vendorSnap)) {
+      if (!hourData || typeof hourData !== 'object') continue
+      for (const [name, data] of Object.entries(hourData.models || {})) {
+        const tokens = data.tokens || 0
+        result[name] = Math.max(result[name] || 0, tokens)
+      }
     }
   }
   return result
@@ -917,17 +947,20 @@ async function resetDeepSeekBudget() {
     _reset: true
   }
 
-  const cacheData = {
-    vendors,
-    errors: [],
-    lastCollect: new Date().toISOString(),
-    deepseekBalance: balance,
-    _raw: raw
-  }
-  writeCache(cacheData)
+  // 基于现有缓存合并更新：只替换 DeepSeek 余额字段，
+  // 保留 kimiBalances / mimoBalances 等其他供应商数据，避免覆盖整个缓存文件
+  const cache = readCache() || { vendors: [] }
+  cache.vendors = vendors
+  cache.errors = []
+  cache.lastCollect = new Date().toISOString()
+  cache.deepseekBalance = balance
+  if (!cache.deepseekBalances) cache.deepseekBalances = {}
+  if (deepseekVendor.id) cache.deepseekBalances[deepseekVendor.id] = balance
+  cache._raw = raw
+  writeCache(cache)
 
   console.log(`[Reset] 余额已初始化: totalBudget=${remaining}, spent=0, rawToppedUp=${raw.topped_up_balance}`)
-  return cacheData
+  return cache
 }
 
 /**
@@ -1081,4 +1114,4 @@ async function collectAll(kimiMonitorLoggedInMap = {}) {
   return cacheData
 }
 
-module.exports = { collectAll, readCache, writeCache, recordTokenUsage, getTokenStats, resetDeepSeekBudget, resetMimoBudget, flushTokenStats, loadTokenStats, recordHourlySnapshot, getPrevModelTokens, getTodayHourlyDeltas, getDailySummary, computeMimoBalance }
+module.exports = { collectAll, readCache, writeCache, recordTokenUsage, getTokenStats, resetDeepSeekBudget, resetMimoBudget, flushTokenStats, loadTokenStats, reloadTokenStats, recordHourlySnapshot, getPrevModelTokens, getTodayHourlyDeltas, getDailySummary, computeMimoBalance }
