@@ -516,6 +516,10 @@ function recordHourlySnapshot(domData, vendorId) {
   }
 
   for (const m of domData.models) {
+    // 快照层同样过滤无效模型名（如 sk- API Key、纯数字、残缺 mimo-v），
+    // 防止污染的历史基线导致后续增量计算错乱
+    if (!m.name || typeof m.name !== 'string') continue
+    if (INVALID_MODEL_NAME_PATTERNS.some(p => p.test(m.name))) continue
     snapshot.models[m.name] = {
       tokens: m.tokens || 0,
       requests: m.requests || 0

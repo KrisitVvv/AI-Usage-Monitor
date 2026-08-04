@@ -26,11 +26,14 @@ const MIMO_USAGE_TOGGLE_XPATH = '/html/body/div/div/div/div/main/div/div/div/div
 // 用量页数据容器 XPath（用户提供）：包含各模型的用量记录
 const MIMO_USAGE_CONTAINER_XPATH = '/html/body/div/div/div/div/main/div/div/div/div/div/div[2]/div[2]'
 
-// 用量页表格 XPath（用户提供）：Token 用量数据在 th[8]（第 9 列）下
+// 用量页表格 XPath（用户提供）：Token 用量数据在"总 Token 数"列（th[7]，0 基）下
 const MIMO_USAGE_TABLE_XPATH = '/html/body/div/div/div/div/main/div/div/div/div/div/div[2]/div[2]/div[3]/div/div/div/div/div/div/div/div/div/table'
 
-// 用量表格中 Token 用量列的固定列号（0 基，对应 thead 中第 9 个 th）
-const MIMO_USAGE_TOKEN_COLUMN = 8
+// 用量表格中"总 Token 数"列的固定列号（0 基）。
+// 真实表头（2026-08 用户确认）：日期(0) 模型(1) API Key(2) 消费金额(3) 输入命中金额(4)
+// 输入未命中金额(5) 输出金额(6) 总Token数(7) 输入命中Token(8) 输入未命中Token(9)
+// 输出Token(10) 音频转写时长(11) 请求次数(12)
+const MIMO_USAGE_TOKEN_COLUMN = 7
 
 /** 页面加载/刷新超时（毫秒） */
 const PAGE_LOAD_TIMEOUT = 30000
@@ -429,8 +432,9 @@ class MimoMonitor {
             if (!name) return false;
             if (name.length > 40) return false;
             if (!/[a-zA-Z0-9]/.test(name)) return false; // 必须含字母或数字（v2.5 / mimo-v3）
-            if (/^mimo-v(?!\d)/i.test(name)) return false;  // mimo-v 后必须跟数字才有效（拒绝 mimo-v-pro0 等）
-            if (/总消耗|总体消费|总用量|单模型|模型消费|消费总金额|请求次数|插件调用|调用次数|暂无数据|日期为|UTC|小计|合计|共\s*\d+|条记录|下一页|上一页|加载中|今日|昨日/.test(name)) return false;
+            if (/^mimo-v(?!\\d)/i.test(name)) return false;  // mimo-v 后必须跟数字才有效（拒绝 mimo-v-pro0 等；注意 \\d 需双反斜杠，否则模板字符串会把 \d 渲染成字面 d）
+            if (/^sk-[a-zA-Z0-9]/.test(name)) return false;  // API Key 被误解析为模型名（如 sk-cjdtp8***whliai）
+            if (/总消耗|总体消费|总用量|单模型|模型消费|消费总金额|请求次数|插件调用|调用次数|暂无数据|日期为|UTC|小计|合计|共\\s*\\d+|条记录|下一页|上一页|加载中|今日|昨日/.test(name)) return false;
             // 名称中不应再出现带单位的数值（如 "v2.5v37万" 这类拼接残留）
             if (/(\\d+(?:\\.\\d+)?)\\s*[万亿wWkKmM]/i.test(name)) return false;
             // 拒绝"纯数字 + 单个字母"的拼接残留（如 42096136s —— 数值被误当模型名）
@@ -485,23 +489,46 @@ class MimoMonitor {
             for (var hi = 0; hi < headerCells.length; hi++) {
               var htext = (headerCells[hi].textContent || '').trim().toLowerCase();
               if (/模型|model|名称|name/.test(htext)) nameIdx = hi;
-              if (/token|tokens|用量|消耗|使用/.test(htext)) tokenIdx = hi;
+              // 优先匹配"总 Token 数"列；其余 token/用量列仅在未命中时记录
+              if (/总\\s*token|token.*总|总token|总消耗|总用量/.test(htext)) tokenIdx = hi;
+              else if (tokenIdx === -1 && /token|tokens|用量|消耗|使用/.test(htext)) tokenIdx = hi;
             }
-            if (ti === 0 && exactTable && headerCells.length > ${JSON.stringify(MIMO_USAGE_TOKEN_COLUMN)}) {
-              // 精确表格：Token 列固定为 th[8]（用户指定），避免关键字误匹配到输入/输出等列
+            // 校验固定列表头文本确为"总 Token 数"，防止页面列调整后再次错位
+            var fixedColIsTotalToken = false;
+            if (headerCells.length > ${JSON.stringify(MIMO_USAGE_TOKEN_COLUMN)}) {
+              var fixedHeaderText = (headerCells[${JSON.stringify(MIMO_USAGE_TOKEN_COLUMN)}].textContent || '').trim().toLowerCase();
+              fixedColIsTotalToken = /总\\s*token|token.*总|总token|总消耗|总用量/.test(fixedHeaderText);
+            }
+            if (ti === 0 && exactTable && headerCells.length > ${JSON.stringify(MIMO_USAGE_TOKEN_COLUMN)} && fixedColIsTotalToken) {
+              // 精确表格：固定列表头确认为"总 Token 数"时强制使用固定列（避免关键字误匹配到输入/输出等列）
               tokenIdx = ${JSON.stringify(MIMO_USAGE_TOKEN_COLUMN)};
               if (nameIdx === -1) nameIdx = 1; // 模型名列未识别时假设为第 2 列
-            } else if (tokenIdx === -1 && headerCells.length > ${JSON.stringify(MIMO_USAGE_TOKEN_COLUMN)}) {
-              // 其他表格：表头关键字未命中但列数充足时，同样按固定列兜底
+            } else if (tokenIdx === -1 && headerCells.length > ${JSON.stringify(MIMO_USAGE_TOKEN_COLUMN)} && fixedColIsTotalToken) {
+              // 其他表格：表头关键字未命中但固定列确认含"总 Token 数"时，按固定列兜底
               tokenIdx = ${JSON.stringify(MIMO_USAGE_TOKEN_COLUMN)};
               if (nameIdx === -1) nameIdx = 1;
             }
             if (tokenIdx === -1) continue;
             var dataRows = table.querySelectorAll('tbody tr');
             if (dataRows.length === 0) dataRows = Array.from(table.querySelectorAll('tr')).slice(1);
+
+            // 页面会同时列出近几天的记录（行首列为日期，如 2026-08-04 / 2026-08-03）。
+            // 只保留今日行；若表格中没有今日行（跨日首启等），回退处理全部行。
+            var dNow = new Date();
+            var todayStr = dNow.getFullYear() + '-' + String(dNow.getMonth() + 1).padStart(2, '0') + '-' + String(dNow.getDate()).padStart(2, '0');
+            var hasTodayRows = false;
+            for (var pr = 0; pr < dataRows.length; pr++) {
+              var pc = dataRows[pr].querySelectorAll('td');
+              if (pc.length > 0 && (pc[0].textContent || '').trim().indexOf(todayStr) !== -1) { hasTodayRows = true; break; }
+            }
+
             for (var ri = 0; ri < dataRows.length; ri++) {
               var cells = dataRows[ri].querySelectorAll('td');
               if (nameIdx >= 0 && cells.length <= Math.max(nameIdx, tokenIdx)) continue;
+              if (hasTodayRows && cells.length > 0) {
+                var dateText = (cells[0].textContent || '').trim();
+                if (dateText.indexOf(todayStr) === -1) continue; // 跳过非今日行
+              }
               var name = nameIdx >= 0 ? (cells[nameIdx]?.textContent || '').trim() : '';
               var tokens = parseTokens(nameIdx >= 0 ? (cells[tokenIdx]?.textContent || '') : (dataRows[ri].textContent || ''));
               if (!tokens || tokens <= 0) continue;
@@ -559,6 +586,7 @@ class MimoMonitor {
           }
 
           var result = Object.entries(models).map(function (e) { return { name: e[0], tokens: e[1] }; });
+
           return JSON.stringify({ ok: true, models: result });
         })()
       `)

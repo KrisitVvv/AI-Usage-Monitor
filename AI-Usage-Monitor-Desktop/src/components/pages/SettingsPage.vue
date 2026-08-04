@@ -32,6 +32,58 @@ let offDownloadProgress = null // 下载进度事件取消订阅函数
 const cacheSize = ref(0)
 const clearingCache = ref(false)
 
+// 数据备份与恢复状态
+const showBackupModal = ref(false)
+const backing = ref(false)
+// 导入前确认弹窗
+const showImportConfirm = ref(false)
+// 导入/导出结果弹窗
+const showDataResultModal = ref(false)
+const dataResultType = ref('success')
+const dataResultTitle = ref('')
+const dataResultMessage = ref('')
+
+// 展示操作结果弹窗（替代框体下方的内联提示）
+function showDataResult(type, title, message) {
+  dataResultType.value = type
+  dataResultTitle.value = title
+  dataResultMessage.value = message
+  showDataResultModal.value = true
+}
+
+async function handleBackup(action) {
+  if (!window.electronAPI || backing.value) return
+  showBackupModal.value = false
+  backing.value = true
+  try {
+    const result = await window.electronAPI.backupData(action)
+    if (result.success) {
+      if (action === 'export') {
+        showDataResult('success', '导出成功', '数据备份导出成功，文件已保存到所选位置。')
+      } else {
+        const count = result.imported ? result.imported.length : 0
+        showDataResult('success', '导入成功', `数据导入成功，已恢复 ${count} 个文件。备份已完全覆盖本地数据，请刷新页面或重启应用以生效。`)
+      }
+    } else if (result.error !== '用户取消') {
+      showDataResult('error', action === 'export' ? '导出失败' : '导入失败', result.error)
+    }
+  } catch (e) {
+    showDataResult('error', '操作失败', e.message || '未知错误')
+  }
+  backing.value = false
+}
+
+// 点击"导入恢复"：先弹出确认提醒（将完全覆盖本地数据，不可恢复）
+function onImportClick() {
+  showBackupModal.value = false
+  showImportConfirm.value = true
+}
+
+function confirmImport() {
+  showImportConfirm.value = false
+  handleBackup('import')
+}
+
 // 更新日志（从 GitHub 获取）
 const changelog = ref([]) // 当前显示的日志（默认仅本版本）
 const allChangelog = ref([]) // 本版本及以下全部历史日志
@@ -454,6 +506,20 @@ async function openChangelog() {
 
       <div v-if="error" class="settings-error">{{ error }}</div>
 
+      <!-- 数据管理 -->
+      <h2 class="settings-title update-title">数据管理</h2>
+      <div class="settings-card">
+        <div class="setting-item feedback-card" @click="showBackupModal = true">
+          <div class="setting-info">
+            <span class="setting-label">数据备份与恢复</span>
+            <span class="setting-desc">导出或导入配置、供应商信息和 Token 使用记录，用于跨设备迁移</span>
+          </div>
+          <svg class="feedback-arrow" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#94a3b8" stroke-width="2">
+            <polyline points="9 18 15 12 9 6"/>
+          </svg>
+        </div>
+      </div>
+
       <!-- 检测与更新 -->
       <h2 class="settings-title update-title">检测与更新</h2>
       <div class="settings-card">
@@ -728,6 +794,105 @@ async function openChangelog() {
       </div>
     </div>
   </Teleport>
+
+  <!-- 数据备份与恢复弹窗 -->
+  <Teleport to="body">
+    <div v-if="showBackupModal" class="modal-overlay" @click.self="showBackupModal = false">
+      <div class="backup-modal">
+        <div class="feedback-modal-header">
+          <span>数据备份与恢复</span>
+          <button class="modal-close-btn" @click="showBackupModal = false">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+            </svg>
+          </button>
+        </div>
+        <p class="feedback-modal-desc">选择你需要的操作：</p>
+        <div class="feedback-options">
+          <div class="feedback-option" @click="handleBackup('export')">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#3b82f6" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
+            </svg>
+            <div class="feedback-option-info">
+              <span class="feedback-option-title">导出备份</span>
+              <span class="feedback-option-desc">将当前配置和历史数据导出为加密备份文件</span>
+            </div>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#94a3b8" stroke-width="2">
+              <polyline points="9 18 15 12 9 6"/>
+            </svg>
+          </div>
+          <div class="feedback-option" @click="onImportClick">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#8b5cf6" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/>
+            </svg>
+            <div class="feedback-option-info">
+              <span class="feedback-option-title">导入恢复</span>
+              <span class="feedback-option-desc">从备份文件恢复配置和历史数据（将覆盖本地所有数据）</span>
+            </div>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#94a3b8" stroke-width="2">
+              <polyline points="9 18 15 12 9 6"/>
+            </svg>
+          </div>
+        </div>
+      </div>
+    </div>
+  </Teleport>
+
+  <!-- 导入确认弹窗 -->
+  <Teleport to="body">
+    <div v-if="showImportConfirm" class="modal-overlay" @click.self="showImportConfirm = false">
+      <div class="import-confirm-modal">
+        <div class="feedback-modal-header">
+          <span>导入确认</span>
+          <button class="modal-close-btn" @click="showImportConfirm = false">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+            </svg>
+          </button>
+        </div>
+        <div class="import-confirm-icon">
+          <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="#d97706" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/>
+            <line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>
+          </svg>
+        </div>
+        <p class="import-confirm-text">
+          导入备份将<strong>完全覆盖</strong>本地所有数据（配置、供应商信息、Token 使用记录），
+          此操作<strong>不可恢复</strong>。是否继续？
+        </p>
+        <div class="import-confirm-actions">
+          <button class="update-modal-btn secondary" @click="showImportConfirm = false">取消</button>
+          <button class="update-modal-btn primary" @click="confirmImport">继续导入</button>
+        </div>
+      </div>
+    </div>
+  </Teleport>
+
+  <!-- 导入/导出结果弹窗 -->
+  <Teleport to="body">
+    <div v-if="showDataResultModal" class="modal-overlay">
+      <div class="update-result-modal">
+        <div class="update-modal-header">
+          <span>{{ dataResultTitle }}</span>
+          <button class="modal-close-btn" @click="showDataResultModal = false">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+            </svg>
+          </button>
+        </div>
+        <div class="update-modal-icon" :class="dataResultType">
+          <svg v-if="dataResultType === 'success'" width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="#16a34a" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/>
+          </svg>
+          <svg v-else width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="#ef4444" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
+          </svg>
+        </div>
+        <p class="update-modal-desc">{{ dataResultMessage }}</p>
+        <button class="update-modal-btn primary" @click="showDataResultModal = false">确定</button>
+      </div>
+    </div>
+  </Teleport>
 </template>
 
 <style scoped>
@@ -857,6 +1022,54 @@ async function openChangelog() {
   border-radius: 8px;
   color: #b91c1c;
   font-size: 0.8125rem;
+}
+
+/* 备份弹窗 */
+.backup-modal {
+  background: white;
+  border-radius: 14px;
+  padding: 1.5rem;
+  max-width: 420px;
+  width: 100%;
+  box-shadow: 0 20px 60px rgba(0,0,0,0.15);
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+/* 导入确认弹窗 */
+.import-confirm-modal {
+  background: white;
+  border-radius: 14px;
+  padding: 1.5rem;
+  max-width: 400px;
+  width: 100%;
+  box-shadow: 0 20px 60px rgba(0,0,0,0.15);
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+.import-confirm-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.import-confirm-text {
+  margin: 0;
+  font-size: 0.85rem;
+  color: #475569;
+  line-height: 1.7;
+  text-align: center;
+}
+.import-confirm-text strong {
+  color: #b91c1c;
+}
+.import-confirm-actions {
+  display: flex;
+  gap: 0.5rem;
+}
+.import-confirm-actions .update-modal-btn {
+  flex: 1;
 }
 
 /* 反馈卡片 */

@@ -1,7 +1,9 @@
-const { app, BrowserWindow, ipcMain, session, Tray, Menu, nativeImage, shell } = require('electron')
+const { app, BrowserWindow, ipcMain, session, Tray, Menu, nativeImage, shell, dialog } = require('electron')
 const path = require('path')
 const fs = require('fs')
 const https = require('https')
+const crypto = require('crypto')
+const zlib = require('zlib')
 const { spawn } = require('child_process')
 const { DeepSeekMonitor } = require('./deepseek-monitor')
 const { KimiMonitor } = require('./kimi-monitor')
@@ -28,6 +30,35 @@ function isValidModelName(name) {
   if (name.length > 40) return false
   if (!/[a-zA-Z0-9]/.test(name)) return false
   return !INVALID_MODEL_NAME_PATTERNS.some(p => p.test(name))
+}
+
+// ===== 备份文件加密 =====
+const BACKUP_MAGIC = Buffer.from('AIBK')
+const BACKUP_VERSION = 1
+const BACKUP_SALT = 'ai-usage-monitor-backup-v1'
+const BACKUP_PASSWORD = 'ai-usage-monitor-2024-backup-key'
+
+function deriveKey(password, salt) {
+  return crypto.scryptSync(password, salt, 32)
+}
+
+function encryptBackup(plaintext) {
+  const key = deriveKey(BACKUP_PASSWORD, BACKUP_SALT)
+  const iv = crypto.randomBytes(16)
+  const cipher = crypto.createCipheriv('aes-256-cbc', key, iv)
+  const compressed = zlib.deflateSync(Buffer.from(plaintext, 'utf-8'))
+  const encrypted = Buffer.concat([cipher.update(compressed), cipher.final()])
+  // 文件结构: magic(4) + version(1) + iv(16) + encrypted_data
+  return Buffer.concat([BACKUP_MAGIC, Buffer.from([BACKUP_VERSION]), iv, encrypted])
+}
+
+function decryptBackup(buffer) {
+  const key = deriveKey(BACKUP_PASSWORD, BACKUP_SALT)
+  const iv = buffer.slice(5, 21)
+  const encrypted = buffer.slice(21)
+  const decipher = crypto.createDecipheriv('aes-256-cbc', key, iv)
+  const compressed = Buffer.concat([decipher.update(encrypted), decipher.final()])
+  return zlib.inflateSync(compressed).toString('utf-8')
 }
 
 // ===== 语义化版本比较工具 =====
@@ -288,12 +319,12 @@ app.whenReady().then(() => {
   scheduler.startBalancePolling()
   scheduler.startPageRefreshPolling()
 
-  // MIMO 余额30秒轮询（与 DeepSeek/Kimi 保持一致）
+  // MIMO 余额60秒轮询（与 DeepSeek/Kimi 保持一致）
   setInterval(() => {
     for (const [, monitor] of mimoMonitors) {
       monitor.refreshBalanceOnly().catch(() => {})
     }
-  }, 30000)
+  }, 60000)
 
   ipcMain.on('window-minimize', (event) => {
     BrowserWindow.fromWebContents(event.sender)?.minimize()
@@ -1159,6 +1190,81 @@ app.whenReady().then(() => {
       } catch {
         return { success: false, error: e.message }
       }
+    }
+  })
+
+  // ---------- 数据备份与恢复 ----------
+  ipcMain.handle('backup-data', async (_event, action) => {
+    try {
+      const userData = app.getPath('userData')
+      const filesToExport = ['vendors.json', 'usage-cache.json', 'token-usage.json', 'settings.json']
+
+      if (action === 'export') {
+        const exportPayload = { _formatVersion: 1, exportedAt: new Date().toISOString() }
+        for (const filename of filesToExport) {
+          const filePath = path.join(userData, filename)
+          try {
+            if (fs.existsSync(filePath)) {
+              const raw = fs.readFileSync(filePath, 'utf-8')
+              exportPayload[filename] = JSON.parse(raw)
+            }
+          } catch { /* 跳过损坏的文件 */ }
+        }
+        const { canceled, filePath: savePath } = await dialog.showSaveDialog(mainWindow, {
+          title: '导出数据备份',
+          defaultPath: `ai-usage-monitor-backup-${new Date().toISOString().slice(0, 10)}.aibk`,
+          filters: [{ name: 'AI Usage Monitor 备份', extensions: ['aibk'] }]
+        })
+        if (canceled || !savePath) return { success: false, error: '用户取消' }
+        const encrypted = encryptBackup(JSON.stringify(exportPayload))
+        fs.writeFileSync(savePath, encrypted)
+        return { success: true }
+      }
+
+      if (action === 'import') {
+        const { canceled, filePaths } = await dialog.showOpenDialog(mainWindow, {
+          title: '导入数据备份',
+          filters: [{ name: 'AI Usage Monitor 备份', extensions: ['aibk'] }],
+          properties: ['openFile']
+        })
+        if (canceled || !filePaths || filePaths.length === 0) return { success: false, error: '用户取消' }
+        const filePath = filePaths[0]
+        const buffer = fs.readFileSync(filePath)
+        if (buffer.length < 22 || buffer.slice(0, 4).toString() !== 'AIBK') {
+          return { success: false, error: '文件格式不兼容，非本应用导出的备份文件' }
+        }
+        let data
+        try {
+          data = JSON.parse(decryptBackup(buffer))
+        } catch {
+          return { success: false, error: '备份文件已损坏或密码错误' }
+        }
+        if (!data || typeof data !== 'object' || !data._formatVersion) {
+          return { success: false, error: '备份文件内容无效' }
+        }
+        let imported = []
+        // 完全覆盖：先冲刷内存中待写入的 Token 统计（避免后续定时写入把旧数据写回磁盘），
+        // 再清除本地全部备份目标文件，最后写入备份中的数据。
+        // 这样备份中不存在的文件也会被移除，本地不会残留任何旧数据。
+        try { flushTokenStats() } catch { /* 非关键 */ }
+        for (const filename of filesToExport) {
+          const fp = path.join(userData, filename)
+          try { if (fs.existsSync(fp)) fs.unlinkSync(fp) } catch { /* 忽略 */ }
+        }
+        for (const filename of filesToExport) {
+          if (data[filename] !== undefined) {
+            fs.writeFileSync(path.join(userData, filename), JSON.stringify(data[filename], null, 2), 'utf-8')
+            imported.push(filename)
+          }
+        }
+        if (imported.length === 0) return { success: false, error: '备份文件中无可导入的数据' }
+        try { loadTokenStats() } catch { /* 非关键 */ }
+        return { success: true, imported }
+      }
+
+      return { success: false, error: '未知操作: ' + action }
+    } catch (e) {
+      return { success: false, error: e.message || '操作失败' }
     }
   })
 

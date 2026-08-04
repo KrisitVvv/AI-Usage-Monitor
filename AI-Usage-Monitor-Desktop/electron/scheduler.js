@@ -25,7 +25,7 @@ class Scheduler {
 
     // ===== 可配置间隔 =====
     /** 余额采集间隔（毫秒） */
-    this.balanceIntervalMs = 30 * 1000
+    this.balanceIntervalMs = 60 * 1000
     /** 用量页面刷新间隔（毫秒） */
     this.pageRefreshIntervalMs = 10 * 60 * 1000
     /** 页面刷新对齐的分钟粒度（每 N 分钟整点执行） */

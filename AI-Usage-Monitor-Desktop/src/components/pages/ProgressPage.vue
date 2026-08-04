@@ -237,7 +237,7 @@ onUnmounted(() => {
         <span class="status-dot-live"></span>
         <span class="status-text">实时数据</span>
         <span class="status-time">上次更新: {{ lastUpdate }}</span>
-        <span class="status-interval">(每 30s 自动刷新)</span>
+        <span class="status-interval">(每 60s 自动刷新)</span>
       </div>
       <div class="status-errors" v-if="fetchErrors.length">
         <span v-for="(err, i) in fetchErrors.slice(0, 2)" :key="i" class="status-error-item">

@@ -88,6 +88,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getCacheSize: () => ipcRenderer.invoke('get-cache-size'),
   clearCache: () => ipcRenderer.invoke('clear-cache'),
 
+  // ---------- 数据备份与恢复 ----------
+  backupData: (action) => ipcRenderer.invoke('backup-data', action),
+
   // ---------- 供 main world 拦截脚本调用的记录接口 ----------
   // 由 main.js 注入的 fetch/XHR 拦截器在检测到
   // DeepSeek Chat API 响应中的 usage 字段后调用此方法
