@@ -18,6 +18,8 @@ const INVALID_MODEL_NAME_PATTERNS = [
   /<[^>]+>/,                  // HTML 标签
   /^\d+$/,                    // 纯数字（token 数值被读成模型名）
   /^\d+[a-zA-Z]$/,            // 数字+单个字母拼接残留（42096136s）
+  /^sk-[a-zA-Z0-9]/,          // API key 被误解析为模型名（如 sk-cjdtp8***whliai）
+  /^mimo-v(?!\d)/i,           // MIMO 残缺模型名（mimo-v / mimo-v-pro0 等），必须 v 后跟数字才有效
   /总消耗|总体消费|总用量|单模型|模型消费|消费总金额|请求次数|插件调用|调用次数|暂无数据|小计|合计|条记录|下一页|上一页|加载中|今日|昨日|日期为|UTC/
 ]
 
@@ -742,7 +744,9 @@ app.whenReady().then(() => {
             continue
           }
           const prev = prevTokensMap[model.name] || 0
-          const delta = Math.max(0, model.tokens - prev)
+          // Kimi 展示当日用量：首次采集（无基线）时直接取当前值作为当天用量；
+          // 有基线时取差值。
+          const delta = prev > 0 ? Math.max(0, model.tokens - prev) : model.tokens
           if (delta === 0) {
             console.log(`[Main]   ${model.name}: 无增量 (${model.tokens} <= 上次 ${prev})`)
             continue
@@ -779,6 +783,7 @@ app.whenReady().then(() => {
     const data = payload.data
 
     // mimo-dom-parsed: DOM 解析的各模型 Token 用量（模型-天，点击切换按钮后的视图）
+    // MIMO 平台"模型-天"视图展示的是当日用量明细（非滚动累计总量），与 Kimi 一致。
     if (data && data.models && Array.isArray(data.models)) {
       let hasNewData = false
       const prevTokensMap = getPrevModelTokens(payload.vendorId)
@@ -789,10 +794,11 @@ app.whenReady().then(() => {
             console.log(`[Main]   忽略无效模型名: ${JSON.stringify(model.name)}`)
             continue
           }
-          // 计算增量：当前累计值 - 上次快照累计值（与 DeepSeek/Kimi 一致）
-          // 跨天/切换日期后当前值回落时（delta 为负）跳过，快照会成为新基线
           const prev = prevTokensMap[model.name] || 0
-          const delta = Math.max(0, model.tokens - prev)
+          // MIMO 展示当日用量：首次采集（无基线）时直接取当前值作为当天用量；
+          // 有基线时取差值，若差值为负（视图切换导致平台值从累计值变为当日值），
+          // 说明本次解析捕获到了完整的当日用量，取当前值作为当天总量。
+          const delta = prev > 0 ? Math.max(0, model.tokens - prev) : model.tokens
           if (delta === 0) {
             console.log(`[Main]   ${model.name}: 无增量 (${model.tokens} <= 上次 ${prev})`)
             continue

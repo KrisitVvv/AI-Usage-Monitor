@@ -25,6 +25,8 @@ const INVALID_MODEL_NAME_PATTERNS = [
   /<[^>]+>/,                  // HTML 标签
   /^\d+$/,                    // 纯数字（token 数值被读成模型名）
   /^\d+[a-zA-Z]$/,            // 数字+单个字母拼接残留（42096136s）
+  /^sk-[a-zA-Z0-9]/,          // API key 被误解析为模型名（如 sk-cjdtp8***whliai）
+  /^mimo-v(?!\d)/i,           // MIMO 残缺模型名（mimo-v / mimo-v-pro0 等），必须 v 后跟数字才有效
   /总消耗|总体消费|总用量|单模型|模型消费|消费总金额|请求次数|插件调用|调用次数|暂无数据|小计|合计|条记录|下一页|上一页|加载中|今日|昨日|日期为|UTC/
 ]
 
@@ -597,13 +599,13 @@ function getVendorProviderMap() {
 
 /**
  * 判断某供应商快照是否为「今日累计」语义。
- * - Kimi 平台展示的是当日用量明细求和，首个快照值即当天至今的用量，无基线时可直接计入当天；
+ * - Kimi / MIMO 平台展示的是当日用量明细求和，首个快照值即当天至今的用量，无基线时可直接计入当天；
  * - DeepSeek 平台展示的是近 30 天滚动总量，无基线时无法区分当天增量，只能作为新基线（增量为 0）。
  */
 function isTodayAccumScope(scopeKey) {
   if (scopeKey === 'default') return false
   const provider = getVendorProviderMap()[String(scopeKey).replace(/^vendor_/, '')] || ''
-  return provider.includes('kimi')
+  return provider.includes('kimi') || provider.includes('mimo')
 }
 
 /**
@@ -661,8 +663,10 @@ function getTodayHourlyDeltas(vendorId) {
           if (mDelta > 0) modelDeltas[name] = mDelta
         }
       } else if (todayAccum) {
-        // 今日累计型供应商（如 Kimi 当日明细求和）：
-        // 首个快照值即当天至今的用量，直接计入，避免因无历史基线/跨天清零而被归零
+        // 今日累计型供应商（如 Kimi / MIMO 当日明细求和）：
+        // 首个快照值即当天至今的用量，直接计入，避免因无历史基线/跨天清零而被归零。
+        // 特殊场景：昨日基线存在但当前值更小（MIMO 切换视图导致页面重置后重新展示当日用量），
+        // 此时应将整个当前值视为今日用量，而非与昨日基线做差（差值为负会被 max(0,..) 归零）。
         delta = curr.totalTokens || 0
         requests = curr.totalRequests || 0
         modelDeltas = {}

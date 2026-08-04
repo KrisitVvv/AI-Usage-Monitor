@@ -157,12 +157,21 @@ class MimoMonitor {
 
   /**
    * 仅刷新余额（不触发用量页解析），供30秒轮询调用。
+   *
+   * 说明：MimoMonitor 在每次用量解析完成后会主动销毁窗口（_destroyWindowAfterParse），
+   * 导致窗口长时间不存在。若 30 秒轮询时窗口已被销毁直接 return，余额将永远无法
+   * 按 30 秒频率刷新。因此这里在窗口缺失时按需重建窗口，保证余额持续更新。
    * @returns {boolean} true=余额刷新成功
    */
   async refreshBalanceOnly() {
     if (this._refreshing || this._isUserLoggingIn) return false
-    if (!this.monitorWindow || this.monitorWindow.isDestroyed()) return false
-    if (this.monitorWindow.isVisible()) return false
+    if (this.monitorWindow?.isVisible()) return false
+
+    // 窗口已被销毁（用量解析后正常销毁）→ 按需重建，30秒轮询即可刷新余额
+    if (!this.monitorWindow || this.monitorWindow.isDestroyed()) {
+      await this._createHiddenWindow()
+      return !!this.monitorWindow
+    }
 
     this._refreshing = true
     try {
@@ -420,7 +429,8 @@ class MimoMonitor {
             if (!name) return false;
             if (name.length > 40) return false;
             if (!/[a-zA-Z0-9]/.test(name)) return false; // 必须含字母或数字（v2.5 / mimo-v3）
-            if (/总消耗|总体消费|总用量|单模型|模型消费|消费总金额|请求次数|插件调用|调用次数|暂无数据|日期为|UTC|小计|合计|共\\s*\\d+|条记录|下一页|上一页|加载中|今日|昨日/.test(name)) return false;
+            if (/^mimo-v(?!\d)/i.test(name)) return false;  // mimo-v 后必须跟数字才有效（拒绝 mimo-v-pro0 等）
+            if (/总消耗|总体消费|总用量|单模型|模型消费|消费总金额|请求次数|插件调用|调用次数|暂无数据|日期为|UTC|小计|合计|共\s*\d+|条记录|下一页|上一页|加载中|今日|昨日/.test(name)) return false;
             // 名称中不应再出现带单位的数值（如 "v2.5v37万" 这类拼接残留）
             if (/(\\d+(?:\\.\\d+)?)\\s*[万亿wWkKmM]/i.test(name)) return false;
             // 拒绝"纯数字 + 单个字母"的拼接残留（如 42096136s —— 数值被误当模型名）
