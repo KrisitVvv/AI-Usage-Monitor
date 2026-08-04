@@ -1,6 +1,6 @@
 {
   "name": "ai-usage-monitor-desktop",
-  "version": "1.2.0-beta",
+  "version": "1.2.0",
   "main": "electron/main.js",
   "scripts": {
     "dev": "vite",
