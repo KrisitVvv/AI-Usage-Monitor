@@ -1,7 +1,6 @@
-const { app, BrowserWindow, ipcMain, session, Tray, Menu, nativeImage, shell, dialog } = require('electron')
+const { app, BrowserWindow, ipcMain, session, Tray, Menu, nativeImage, shell, dialog, net } = require('electron')
 const path = require('path')
 const fs = require('fs')
-const https = require('https')
 const crypto = require('crypto')
 const zlib = require('zlib')
 const { spawn } = require('child_process')
@@ -134,56 +133,64 @@ function matchUpdateAsset(assets, installType) {
   return exeAssets.find(a => !/setup/i.test(a.name)) || exeAssets[0] || null
 }
 
-// 流式下载文件（支持 GitHub 302 重定向），并上报下载进度
-function downloadFileWithProgress(url, savePath, onProgress, redirects = 0) {
+// 流式下载文件（走 Electron net 网络栈）并上报下载进度
+// 说明：Node.js 的 https.get / fetch 不会读取 Windows 系统代理设置，
+// VPN 处于代理模式时请求会绕过代理直连 GitHub，导致下载极慢或超时。
+// 改用 net.request（Chromium 网络栈）后会自动跟随系统代理，VPN 即可生效。
+function downloadFileWithProgress(url, savePath, onProgress) {
   return new Promise((resolve, reject) => {
-    if (redirects > 5) {
-      reject(new Error('重定向次数过多'))
-      return
-    }
-    const req = https.get(url, { headers: { 'User-Agent': 'AI-Usage-Monitor' } }, (res) => {
-      // 收到响应后清除空闲超时，避免大文件下载被误判
-      req.setTimeout(0)
+    let received = 0
+    let total = 0
+    let idleTimer = null
+    let finished = false
 
-      if ([301, 302, 303, 307, 308].includes(res.statusCode)) {
-        const location = res.headers.location
-        res.resume()
-        if (!location) {
-          reject(new Error('重定向地址缺失'))
-          return
-        }
-        resolve(downloadFileWithProgress(location, savePath, onProgress, redirects + 1))
-        return
-      }
-      if (res.statusCode >= 400) {
-        res.resume()
-        reject(new Error(`HTTP ${res.statusCode}`))
-        return
-      }
-      const total = parseInt(res.headers['content-length'] || '0', 10)
-      let received = 0
-      const file = fs.createWriteStream(savePath)
-      res.on('data', (chunk) => {
-        received += chunk.length
-        onProgress(received, total)
-      })
-      res.pipe(file)
-      file.on('finish', () => file.close(() => resolve(savePath)))
-      file.on('error', (err) => {
-        try { fs.unlinkSync(savePath) } catch { /* 忽略 */ }
-        reject(err)
-      })
-      res.on('error', (err) => {
-        try { fs.unlinkSync(savePath) } catch { /* 忽略 */ }
-        reject(err)
-      })
-    })
+    const fail = (err) => {
+      if (finished) return
+      finished = true
+      if (idleTimer) clearTimeout(idleTimer)
+      try { fs.unlinkSync(savePath) } catch { /* 忽略 */ }
+      reject(err)
+    }
 
     // 30 秒内无数据则判定为网络阻塞，中断下载并给出可操作提示
-    req.setTimeout(30000, () => {
-      req.destroy(new Error('下载超时（长时间无数据），请检查网络连接后重试'))
+    const resetIdleTimer = () => {
+      if (idleTimer) clearTimeout(idleTimer)
+      idleTimer = setTimeout(() => {
+        try { request.abort() } catch { /* 忽略 */ }
+        fail(new Error('下载超时（长时间无数据），请检查网络连接后重试'))
+      }, 30000)
+    }
+
+    const request = net.request({ url, redirect: 'follow' })
+    request.setHeader('User-Agent', 'AI-Usage-Monitor')
+
+    request.on('response', (response) => {
+      if (response.statusCode >= 400) {
+        fail(new Error(`HTTP ${response.statusCode}`))
+        return
+      }
+      total = parseInt(response.headers['content-length'] || '0', 10)
+      const file = fs.createWriteStream(savePath)
+      response.on('data', (chunk) => {
+        received += chunk.length
+        resetIdleTimer()
+        onProgress(received, total)
+      })
+      response.pipe(file)
+      file.on('finish', () => {
+        if (idleTimer) clearTimeout(idleTimer)
+        file.close(() => {
+          if (finished) return
+          finished = true
+          resolve(savePath)
+        })
+      })
+      file.on('error', (err) => fail(err))
+      resetIdleTimer()
     })
-    req.on('error', reject)
+
+    request.on('error', (err) => fail(err))
+    request.end()
   })
 }
 
@@ -1105,7 +1112,7 @@ app.whenReady().then(() => {
   // ---------- 检查 GitHub 更新 ----------
   ipcMain.handle('check-for-updates', async () => {
     try {
-      const response = await fetch('https://api.github.com/repos/KrisitVvv/AI-Usage-Monitor/releases/latest')
+      const response = await net.fetch('https://api.github.com/repos/KrisitVvv/AI-Usage-Monitor/releases/latest')
       if (!response.ok) {
         return { success: false, error: `GitHub API 返回 ${response.status}` }
       }
@@ -1176,7 +1183,7 @@ app.whenReady().then(() => {
   // ---------- 获取更新日志（从 GitHub Releases API） ----------
   ipcMain.handle('get-changelog', async () => {
     try {
-      const response = await fetch('https://api.github.com/repos/KrisitVvv/AI-Usage-Monitor/releases?per_page=20')
+      const response = await net.fetch('https://api.github.com/repos/KrisitVvv/AI-Usage-Monitor/releases?per_page=20')
       if (!response.ok) {
         return { success: false, error: `GitHub API 返回 ${response.status}` }
       }
