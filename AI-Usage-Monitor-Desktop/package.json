@@ -12,8 +12,9 @@
   "build": {
     "appId": "com.yourcompany.ai-usage-monitor",
     "productName": "AI Usage Monitor",
+    "compression": "maximum",
     "directories": {
-      "output": "dist"
+      "output": "release"
     },
     "files": [
       "dist/**/*",
