@@ -113,6 +113,11 @@ function compareVersions(v1, v2) {
 // 设置应用名称（影响开机自启动注册表条目名称等）
 app.name = 'AI Usage Monitor'
 
+// 全局兜底：避免未捕获异常直接导致应用崩溃（正常路径会各自捕获并返回给渲染进程）
+process.on('uncaughtException', (err) => {
+  console.error('[Main] 未捕获异常:', err)
+})
+
 // ===== 更新下载与安装工具 =====
 
 // 判断当前运行的是安装版还是免安装版
@@ -131,6 +136,12 @@ function matchUpdateAsset(assets, installType) {
     return exeAssets.find(a => /setup/i.test(a.name)) || exeAssets[0] || null
   }
   return exeAssets.find(a => !/setup/i.test(a.name)) || exeAssets[0] || null
+}
+
+// 从安装包文件名中提取版本号（如 AI.Usage.Monitor.Setup.1.3.1.exe → 1.3.1）
+function extractVersionFromAsset(name) {
+  const m = String(name || '').match(/(\d+\.\d+\.\d+)/)
+  return m ? m[1] : ''
 }
 
 // 流式下载文件（走 Electron net 网络栈）并上报下载进度
@@ -1114,7 +1125,10 @@ app.whenReady().then(() => {
     try {
       const response = await net.fetch('https://api.github.com/repos/KrisitVvv/AI-Usage-Monitor/releases/latest')
       if (!response.ok) {
-        return { success: false, error: `GitHub API 返回 ${response.status}` }
+        const hint = response.status === 403
+          ? 'GitHub API 访问受限（403：请求过于频繁或当前网络 IP 被限制），请稍后再试或关闭 VPN 后重试'
+          : `GitHub API 返回 ${response.status}`
+        return { success: false, error: hint }
       }
       const release = await response.json()
       const latestVersion = (release.tag_name || '').replace(/^v/i, '')
@@ -1147,6 +1161,48 @@ app.whenReady().then(() => {
       const dir = path.join(app.getPath('userData'), 'updates')
       fs.mkdirSync(dir, { recursive: true })
       const savePath = path.join(dir, assetName)
+
+      // 版本对比：目标版本号取自本次安装包文件名
+      const targetVersion = extractVersionFromAsset(assetName)
+
+      // 扫描目录中已有的安装包，清理与目标版本不一致的旧安装包
+      try {
+        const entries = fs.readdirSync(dir, { withFileTypes: true })
+        for (const entry of entries) {
+          if (!entry.isFile() || !/\.exe$/i.test(entry.name)) continue
+          if (entry.name === assetName) continue
+          const oldVersion = extractVersionFromAsset(entry.name)
+          if (targetVersion && oldVersion && oldVersion !== targetVersion) {
+            console.log(`[Main] 清理旧版本安装包 ${entry.name} (${oldVersion})`)
+            try { fs.unlinkSync(path.join(dir, entry.name)) } catch { /* 忽略锁定文件 */ }
+          }
+        }
+      } catch { /* 忽略扫描失败 */ }
+
+      // 已存在目标版本安装包：校验大小与远端一致则跳过下载，直接进入安装
+      if (fs.existsSync(savePath)) {
+        try {
+          const head = await net.fetch(downloadUrl, { method: 'HEAD' })
+          const remoteSize = parseInt(head.headers.get('content-length') || '0', 10)
+          const localSize = fs.statSync(savePath).size
+          if (remoteSize > 0 && localSize === remoteSize) {
+            console.log('[Main] 安装包已存在（版本匹配），跳过下载:', savePath)
+            event.sender.send('update-download-progress', {
+              received: localSize, total: localSize, percent: 100
+            })
+            return { success: true, filePath: savePath, fromCache: true }
+          }
+          // 大小不一致（上次下载中断残留残缺文件），删除后重新下载
+          try { fs.unlinkSync(savePath) } catch { /* 忽略 */ }
+        } catch {
+          // HEAD 校验失败（网络异常）：本地已有完整文件则直接复用，避免重复下载
+          if (fs.statSync(savePath).size > 0) {
+            console.log('[Main] 安装包已存在（版本匹配，未校验），跳过下载:', savePath)
+            return { success: true, filePath: savePath, fromCache: true }
+          }
+        }
+      }
+
       await downloadFileWithProgress(downloadUrl, savePath, (received, total) => {
         event.sender.send('update-download-progress', {
           received,
@@ -1163,13 +1219,32 @@ app.whenReady().then(() => {
 
   // ---------- 启动安装程序（安装版自动更新） ----------
   ipcMain.handle('install-update', async (_event, filePath) => {
+    if (!filePath || !fs.existsSync(filePath)) {
+      return { success: false, error: '安装包不存在' }
+    }
     try {
-      if (!filePath || !fs.existsSync(filePath)) {
-        return { success: false, error: '安装包不存在' }
+      // 以独立进程启动安装程序；spawn 的错误通过 'error' 事件异步触发，
+      // 必须监听并返回给渲染进程，否则会变成未捕获异常导致应用崩溃。
+      // EACCES 常见于安全软件正在扫描/锁定刚下载完成的安装包。
+      const started = await new Promise((resolve) => {
+        const child = spawn(filePath, [], { detached: true, stdio: 'ignore' })
+        child.unref()
+        const timer = setTimeout(() => resolve(true), 3000)
+        child.once('error', (err) => {
+          clearTimeout(timer)
+          console.error('[Main] 启动安装程序失败:', err.message)
+          resolve(false)
+        })
+        child.once('spawn', () => clearTimeout(timer))
+      })
+
+      if (!started) {
+        // spawn 失败（如 EACCES）：降级用系统方式打开安装包，绕过 spawn 权限限制
+        const openErr = await shell.openPath(filePath)
+        if (openErr) {
+          return { success: false, error: `启动安装程序失败，请手动运行安装包：${filePath}` }
+        }
       }
-      // 以独立进程启动安装程序，随后退出当前应用，由安装程序接管
-      const child = spawn(filePath, [], { detached: true, stdio: 'ignore' })
-      child.unref()
       setTimeout(() => {
         app.quit()
       }, 1000)
@@ -1180,12 +1255,44 @@ app.whenReady().then(() => {
     }
   })
 
-  // ---------- 获取更新日志（从 GitHub Releases API） ----------
+  // ---------- 获取更新日志（从 GitHub Releases API，带本地缓存与限流降级） ----------
+  // 403 说明：GitHub API 未认证请求限制 60 次/小时/IP，VPN 出口 IP 可能共享或被风控，
+  // 因此缓存更新日志（30 分钟 TTL），API 被限流时降级返回旧缓存，避免每次打开都失败。
   ipcMain.handle('get-changelog', async () => {
+    const cachePath = path.join(app.getPath('userData'), 'changelog-cache.json')
+    const CACHE_TTL = 30 * 60 * 1000 // 30 分钟
+    const readCache = () => {
+      try {
+        if (!fs.existsSync(cachePath)) return null
+        const data = JSON.parse(fs.readFileSync(cachePath, 'utf-8'))
+        return (data && Array.isArray(data.list)) ? data : null
+      } catch { return null }
+    }
+    const writeCache = (list) => {
+      try {
+        fs.writeFileSync(cachePath, JSON.stringify({ ts: Date.now(), list }))
+      } catch { /* 忽略 */ }
+    }
+
+    // 1. 命中有效缓存直接返回
+    const cached = readCache()
+    if (cached && Date.now() - cached.ts < CACHE_TTL) {
+      return { success: true, list: cached.list }
+    }
+
     try {
-      const response = await net.fetch('https://api.github.com/repos/KrisitVvv/AI-Usage-Monitor/releases?per_page=20')
+      const response = await net.fetch('https://api.github.com/repos/KrisitVvv/AI-Usage-Monitor/releases?per_page=20', {
+        headers: { 'Accept': 'application/vnd.github+json' }
+      })
       if (!response.ok) {
-        return { success: false, error: `GitHub API 返回 ${response.status}` }
+        // 2. API 被限流/拒绝时降级用旧缓存（即使过期也返回，保证可用）
+        if (cached) {
+          return { success: true, list: cached.list, fromCache: true }
+        }
+        const hint = response.status === 403
+          ? 'GitHub API 访问受限（403：请求过于频繁或当前网络 IP 被限制），请稍后再试或关闭 VPN 后重试'
+          : `GitHub API 返回 ${response.status}`
+        return { success: false, error: hint }
       }
       const releases = await response.json()
       const list = releases.map(r => ({
@@ -1194,9 +1301,14 @@ app.whenReady().then(() => {
         changes: parseReleaseNotes(r.body || ''),
         downloadUrl: r.html_url
       }))
+      writeCache(list)
       return { success: true, list }
     } catch (e) {
       console.error('[Main] 获取更新日志失败:', e.message)
+      // 网络异常时同样降级用旧缓存
+      if (cached) {
+        return { success: true, list: cached.list, fromCache: true }
+      }
       return { success: false, error: e.message }
     }
   })
@@ -1216,6 +1328,7 @@ app.whenReady().then(() => {
   ipcMain.handle('get-cache-size', async () => {
     try {
       const cachePath = path.join(app.getPath('userData'), 'Cache')
+      const updatesPath = path.join(app.getPath('userData'), 'updates')
       let totalSize = 0
       function calcSize(dir) {
         if (!fs.existsSync(dir)) return
@@ -1230,6 +1343,7 @@ app.whenReady().then(() => {
         }
       }
       calcSize(cachePath)
+      calcSize(updatesPath) // 已下载的安装包也计入缓存
       return { success: true, size: totalSize }
     } catch (e) {
       return { success: false, error: e.message, size: 0 }
@@ -1246,6 +1360,11 @@ app.whenReady().then(() => {
       await ses.clearStorageData({
         storages: ['caches', 'serviceworkers', 'localstorage']
       })
+      // 清理已下载的安装包（安装完成后残留的旧安装包）
+      const updatesPath = path.join(app.getPath('userData'), 'updates')
+      if (fs.existsSync(updatesPath)) {
+        fs.rmSync(updatesPath, { recursive: true, force: true })
+      }
       return { success: true }
     } catch (e) {
       console.warn('[Main] 清理缓存失败:', e.message)
@@ -1264,6 +1383,13 @@ app.whenReady().then(() => {
               }
             } catch { /* 忽略锁定文件 */ }
           }
+        }
+        // 清理已下载的安装包（忽略锁定文件）
+        const updatesPath = path.join(app.getPath('userData'), 'updates')
+        if (fs.existsSync(updatesPath)) {
+          try {
+            fs.rmSync(updatesPath, { recursive: true, force: true })
+          } catch { /* 忽略锁定文件 */ }
         }
         return { success: true }
       } catch {
