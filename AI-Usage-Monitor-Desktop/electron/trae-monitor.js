@@ -265,7 +265,7 @@ class TraeMonitor {
     for (let attempt = 0; attempt < 4; attempt++) {
       result = await this._evalCredits()
       if (navVersion !== undefined && navVersion !== this._navVersion) return
-      if (result && result.ok && (result.general?.remaining > 0 || result.general?.total > 0 || result.work?.remaining > 0 || result.work?.total > 0)) break
+      if (result && result.ok && (result.general?.remaining > 0 || result.work?.remaining > 0)) break
       console.log(`[TraeMonitor:${this.vendorId}] 第 ${attempt + 1} 次解析无有效积分数据，等待重试...`)
       await new Promise(resolve => setTimeout(resolve, 2500))
       if (navVersion !== undefined && navVersion !== this._navVersion) return
@@ -278,7 +278,8 @@ class TraeMonitor {
       if (!wasLoggedIn && this.onLoginStatusChanged) {
         this.onLoginStatusChanged(this.vendorId, true)
       }
-      console.log(`[TraeMonitor:${this.vendorId}] 解析到积分: 通用=${result.general.remaining}/${result.general.total}, Work=${result.work.remaining}/${result.work.total}`)
+      console.log(`[TraeMonitor:${this.vendorId}] 解析到积分: 通用=${result.general.remaining}, Work=${result.work.remaining}`)
+      if (result.text) console.log(`[TraeMonitor:${this.vendorId}] 积分区块文本:`, result.text)
 
       if (this._callback) {
         this._callback({
@@ -294,13 +295,16 @@ class TraeMonitor {
           }
         })
       }
+
+      // 数据获取完成，自动关闭隐藏窗口（登录态已持久化在 persist session，下次刷新按需重建）
+      this._destroyHiddenWindow()
     } else {
       const reason = result ? (result.reason || 'no-data') : 'eval-failed'
       console.warn(`[TraeMonitor:${this.vendorId}] 积分解析失败: ${reason}（页面结构可能变化或尚未登录）`)
     }
   }
 
-  /** 执行页面内 JS：定位积分区块并解析"通用积分 / Work专属积分" */
+  /** 执行页面内 JS：定位积分区块并解析"通用积分 / Work专属积分"的剩余值 */
   async _evalCredits() {
     if (!this.monitorWindow || this.monitorWindow.isDestroyed()) return null
     try {
@@ -328,12 +332,17 @@ class TraeMonitor {
               }
             }
           }
-          if (!section) return JSON.stringify({ ok: false, reason: 'section-not-found' });
+          var text = (section ? (section.innerText || section.textContent || '') : '').trim();
+          // 3. section 里没有"通用/Work"关键词时改用整页文本（积分区域可能在 section 之外）
+          if (!text || (!/通用/.test(text) && !/(Work|work|专属)/.test(text))) {
+            var body = ((document.body && (document.body.innerText || document.body.textContent)) || '');
+            if (body && /通用/.test(body) && /(Work|work|专属)/.test(body)) {
+              text = body.trim();
+            }
+          }
+          if (!text) return JSON.stringify({ ok: false, reason: 'empty-text' });
 
-          var text = (section.innerText || section.textContent || '').trim();
-          if (!text) return JSON.stringify({ ok: false, reason: 'empty-section' });
-
-          // 3. 按关键词拆分"通用积分"与"work专属积分"两段
+          // 4. 按关键词切分"通用积分"与"Work专属积分"两段（兼容 Work 区块在通用之前的布局）
           var gIdx = text.indexOf('通用');
           var wIdx = -1;
           var wKeys = ['Work专属', 'work专属', 'Work 专属', '仅Work', '仅work', 'Work可用', 'work可用', '仅Work可用'];
@@ -341,40 +350,47 @@ class TraeMonitor {
             var idx = text.indexOf(wKeys[k]);
             if (idx !== -1) { wIdx = idx; break; }
           }
-          var generalText = gIdx >= 0 ? text.substring(gIdx, wIdx >= 0 ? wIdx : text.length) : '';
-          var workText = wIdx >= 0 ? text.substring(wIdx) : '';
-
-          // 4. 解析每段中的 "剩余 / 总量" 对（如 3,938 / 6,000）
-          function sumPool(t) {
-            var remaining = 0, total = 0, count = 0;
-            var re = /([\\d][\\d,]*(?:\\.[\\d]+)?)\\s*\\/\\s*([\\d][\\d,]*(?:\\.[\\d]+)?)/g;
-            var m;
-            while ((m = re.exec(t)) !== null) {
-              var rem = parseFloat(m[1].replace(/,/g, ''));
-              var tot = parseFloat(m[2].replace(/,/g, ''));
-              if (!isNaN(rem) && !isNaN(tot) && tot > 0) {
-                remaining += rem;
-                total += tot;
-                count++;
-              }
-            }
-            // 兜底：若无 "X / Y" 对，取最后出现的数字作为剩余（无总量时 total = remaining）
-            if (count === 0) {
-              var nums = (t.match(/\\d[\\d,]*(?:\\.[\\d]+)?/g) || []).map(function(s) { return parseFloat(s.replace(/,/g, '')); });
-              if (nums.length > 0) {
-                remaining = nums[nums.length - 1];
-                total = remaining;
-              }
-            }
-            return { remaining: remaining, total: total };
+          var generalSeg = '', workSeg = '';
+          if (gIdx === -1 && wIdx === -1) {
+            generalSeg = text;
+          } else if (wIdx === -1) {
+            generalSeg = text.substring(gIdx);
+          } else if (gIdx === -1) {
+            workSeg = text.substring(wIdx);
+          } else if (wIdx > gIdx) {
+            generalSeg = text.substring(gIdx, wIdx);
+            workSeg = text.substring(wIdx);
+          } else {
+            // Work 区块在"通用"之前
+            workSeg = text.substring(wIdx, gIdx);
+            generalSeg = text.substring(gIdx);
           }
 
-          var general = sumPool(generalText);
-          var work = sumPool(workText);
+          // 5. 提取每段的剩余积分：
+          //    - 有 "X / Y" 对时累加 X（X 为剩余，Y 为总量已弃用，不参与计算）
+          //    - 无 "X / Y" 对时取段中最后一个数字作为剩余
+          function extractRemaining(seg) {
+            if (!seg) return 0;
+            var remaining = 0, count = 0;
+            var re = /(\\d[\\d,]*(?:\\.[\\d]+)?)\\s*\\/\\s*\\d[\\d,]*(?:\\.[\\d]+)?/g;
+            var m;
+            while ((m = re.exec(seg)) !== null) {
+              var v = parseFloat(m[1].replace(/,/g, ''));
+              if (!isNaN(v) && v > 0) { remaining += v; count++; }
+            }
+            if (count === 0) {
+              var nums = (seg.match(/\\d[\\d,]*(?:\\.[\\d]+)?/g) || []).map(function(s) { return parseFloat(s.replace(/,/g, '')); });
+              if (nums.length > 0) remaining = nums[nums.length - 1];
+            }
+            return Math.round(remaining * 100) / 100;
+          }
+
+          var general = { remaining: extractRemaining(generalSeg) };
+          var work = { remaining: extractRemaining(workSeg) };
 
           return JSON.stringify({
             ok: true,
-            text: text.substring(0, 1200),
+            text: text.substring(0, 1500),
             general: general,
             work: work
           });
@@ -452,10 +468,11 @@ class TraeMonitor {
 
     this.monitorWindow.on('closed', () => {
       this.monitorWindow = null
-      // 仅在非主动销毁时重置登录状态（解析成功后主动 destroy 不重置）
+      // 仅在非主动销毁时重置登录状态（解析成功后主动销毁不重置）
       if (!this._destroying) {
         this._isLoggedIn = false
       }
+      this._destroying = false
     })
 
     this.monitorWindow.webContents.on('did-finish-load', () => {
@@ -464,6 +481,15 @@ class TraeMonitor {
 
     await this.monitorWindow.loadURL(TRAE_DASHBOARD_URL)
     this._startLoadTimeout()
+  }
+
+  /** 积分解析成功后主动销毁隐藏窗口（登录态已持久化在 session 中，下次刷新按需重建） */
+  _destroyHiddenWindow() {
+    if (!this.monitorWindow || this.monitorWindow.isDestroyed()) return
+    console.log(`[TraeMonitor:${this.vendorId}] 积分获取完成，关闭隐藏窗口`)
+    this._destroying = true
+    this._clearAllTimers()
+    try { this.monitorWindow.close() } catch { /* 忽略 */ }
   }
 
   _startLoadTimeout() {

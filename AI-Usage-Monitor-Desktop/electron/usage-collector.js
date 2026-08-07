@@ -887,31 +887,39 @@ function computeMimoBalance(raw, prevCache, vendorId) {
 // ---------- Trae CN 积分计算 ----------
 /**
  * 计算 Trae CN 积分余额（无 API，数据来自 TraeMonitor 抓取的看板页面）：
- * - raw.general / raw.work 分别包含 { remaining, total }
- * - 总剩余积分 = 通用积分剩余 + Work专属积分剩余
- * - 累计消耗积分 = (通用总量 - 通用剩余) + (Work总量 - Work剩余)
+ * - raw.general / raw.work 仅包含 { remaining }（各自的剩余积分）
+ * - 逻辑与 DeepSeek 一致：缓存"初始积分"作为总量基线（首次抓取时 = 当前剩余，之后不变，
+ *   除非用户点击"初始化"重置为新基线），已消耗 = 初始积分 - 最新剩余
  */
 function computeTraeBalance(raw, prevCache, vendorId) {
-  const general = raw?.general || { remaining: 0, total: 0 }
-  const work = raw?.work || { remaining: 0, total: 0 }
+  const general = raw?.general || { remaining: 0 }
+  const work = raw?.work || { remaining: 0 }
 
-  const generalSpent = Math.max(0, (general.total || 0) - (general.remaining || 0))
-  const workSpent = Math.max(0, (work.total || 0) - (work.remaining || 0))
+  const currentRemaining = (general.remaining || 0) + (work.remaining || 0)
+  const currentGeneralRemaining = general.remaining || 0
+  const currentWorkRemaining = work.remaining || 0
 
-  const remaining = (general.remaining || 0) + (work.remaining || 0)
-  const spent = generalSpent + workSpent
-  const totalBudget = remaining + spent
-  const usedPercent = totalBudget > 0 ? Math.round((spent / totalBudget) * 100) : 0
+  // 初始积分基线：优先沿用缓存中的 totalBudget / general.total / work.total（即最开始的积分），
+  // 首次抓取或缓存无数据时以当前剩余作为初始值
+  const prev = prevCache?.traeBalances?.[vendorId] || null
+  const initialTotal = (prev?.totalBudget && prev.totalBudget > 0) ? prev.totalBudget : currentRemaining
+  const initialGeneral = (prev?.general?.total && prev.general.total > 0) ? prev.general.total : currentGeneralRemaining
+  const initialWork = (prev?.work?.total && prev.work.total > 0) ? prev.work.total : currentWorkRemaining
+
+  const spent = Math.max(0, initialTotal - currentRemaining)
+  const generalSpent = Math.max(0, initialGeneral - currentGeneralRemaining)
+  const workSpent = Math.max(0, initialWork - currentWorkRemaining)
+  const usedPercent = initialTotal > 0 ? Math.round((spent / initialTotal) * 100) : 0
 
   return {
-    totalBudget,        // 总积分（剩余 + 已消耗）
-    remaining,           // 总剩余积分
-    spent,               // 累计消耗积分
+    totalBudget: initialTotal,          // 初始积分（缓存的基线，不随剩余变化）
+    remaining: currentRemaining,        // 当前总剩余积分
+    spent,                              // 累计消耗积分
     usedPercent,
-    general: { remaining: general.remaining || 0, total: general.total || 0, spent: generalSpent },
-    work: { remaining: work.remaining || 0, total: work.total || 0, spent: workSpent },
+    general: { remaining: currentGeneralRemaining, total: initialGeneral, spent: generalSpent },
+    work: { remaining: currentWorkRemaining, total: initialWork, spent: workSpent },
     currency: 'CREDIT',
-    is_available: remaining > 0,
+    is_available: currentRemaining > 0,
     fetchedAt: raw?.fetchedAt || new Date().toISOString()
   }
 }
