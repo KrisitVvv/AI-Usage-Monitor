@@ -6,6 +6,7 @@ const emit = defineEmits(['close', 'saved'])
 // ---------- 供应商与计费模式配置 ----------
 const PROVIDERS = [
   { name: 'XIAOMI MIMO', billingModels: ['plan', 'token'], requiresApiKey: false },
+  { name: 'Trae CN', billingModels: ['plan'], requiresApiKey: false },
   { name: 'DeepSeek API', billingModels: ['token'] },
   { name: 'Kimi CN', billingModels: ['token'] },
   { name: 'OpenAI API', billingModels: ['plan', 'token'] },

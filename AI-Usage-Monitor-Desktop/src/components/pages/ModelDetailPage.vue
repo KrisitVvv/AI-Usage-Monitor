@@ -36,17 +36,18 @@ onMounted(async () => {
         const found = data.vendors?.find(v => v.id === route.params.id)
         vendor.value = found || null
         // 按 vendor ID 查找 balance；全局 fallback 仅对 DeepSeek / Kimi / MIMO 生效，避免其他供应商继承错误数据
-        const balances = { ...(data.deepseekBalances || {}), ...(data.kimiBalances || {}), ...(data.mimoBalances || {}) }
+        const balances = { ...(data.deepseekBalances || {}), ...(data.kimiBalances || {}), ...(data.mimoBalances || {}), ...(data.traeBalances || {}) }
         balance.value = balances[route.params.id]
           || (isDeepSeek.value ? data.deepseekBalance : null)
           || (isKimi.value ? data.kimiBalance : null)
           || (isMimo.value ? data.mimoBalance : null)
+          || (isTrae.value ? data.traeBalance : null)
           || null
       }
     } catch { /* 忽略 */ }
 
-    // 查询 DeepSeek/Kimi/MIMO Monitor 实际登录状态
-    if ((isDeepSeek.value || vendorType.value === 'Moonshot' || isMimo.value) && window.electronAPI.getMonitorLoginStatus) {
+    // 查询 DeepSeek/Kimi/MIMO/Trae Monitor 实际登录状态
+    if ((isDeepSeek.value || vendorType.value === 'Moonshot' || isMimo.value || isTrae.value) && window.electronAPI.getMonitorLoginStatus) {
       try {
         const loggedIn = await window.electronAPI.getMonitorLoginStatus(vendor.value?.id)
         monitorLoggedIn.value = !!loggedIn
@@ -64,7 +65,7 @@ onMounted(async () => {
 
     // 定期轮询登录状态（作为事件推送的补充，防止遗漏）
     loginStatusPollTimer = setInterval(async () => {
-      if (!isDeepSeek.value && vendorType.value !== 'Moonshot' && !isMimo.value) return
+      if (!isDeepSeek.value && vendorType.value !== 'Moonshot' && !isMimo.value && !isTrae.value) return
       if (!window.electronAPI?.getMonitorLoginStatus || !vendor.value?.id) return
       try {
         const loggedIn = await window.electronAPI.getMonitorLoginStatus(vendor.value.id)
@@ -82,11 +83,12 @@ onMounted(async () => {
         }
         vendor.value = found
       }
-      const balances = { ...(data.deepseekBalances || {}), ...(data.kimiBalances || {}), ...(data.mimoBalances || {}) }
+      const balances = { ...(data.deepseekBalances || {}), ...(data.kimiBalances || {}), ...(data.mimoBalances || {}), ...(data.traeBalances || {}) }
       const newBalance = balances[route.params.id]
         || (isDeepSeek.value ? data.deepseekBalance : null)
         || (isKimi.value ? data.kimiBalance : null)
         || (isMimo.value ? data.mimoBalance : null)
+        || (isTrae.value ? data.traeBalance : null)
       if (newBalance) balance.value = newBalance
     })
   }
@@ -105,11 +107,12 @@ const goBack = () => router.push({ name: 'progress' })
 const isDeepSeek = computed(() => vendor.value?.provider === 'DeepSeek API')
 const isKimi = computed(() => vendor.value?.provider === 'Kimi CN')
 const isMimo = computed(() => vendor.value?.provider === 'XIAOMI MIMO')
+const isTrae = computed(() => vendor.value?.provider === 'Trae CN')
 const isPlan = computed(() => vendor.value?.billingModel === 'plan')
 const isToken = computed(() => vendor.value?.billingModel === 'token')
 const hasBalance = computed(() => !!balance.value)
-const isLive = computed(() => (isDeepSeek.value || isMimo.value) ? monitorLoggedIn.value : (hasBalance.value && !balance.value?._stale))
-const isLoggedIn = computed(() => isDeepSeek.value ? monitorLoggedIn.value : hasBalance.value)
+const isLive = computed(() => (isDeepSeek.value || isMimo.value || isTrae.value) ? monitorLoggedIn.value : (hasBalance.value && !balance.value?._stale))
+const isLoggedIn = computed(() => (isDeepSeek.value || isTrae.value) ? monitorLoggedIn.value : hasBalance.value)
 const displayName = computed(() => vendor.value?.customName || shortName(vendor.value?.provider || ''))
 
 const modelColor = computed(() => vendorColor(vendor.value?.provider || ''))
@@ -154,7 +157,7 @@ function shortName(provider) {
     'DeepSeek API': 'DeepSeek', 'OpenAI API': 'OpenAI', 'Kimi CN': 'Kimi CN',
     'Aliyun API': '阿里云', '智谱 AI': 'GLM', 'Anthropic': 'Claude',
     'Google AI': 'Gemini', 'Stability AI': 'SDXL', '百度文心': '文心', '科大讯飞': '讯飞',
-    'XIAOMI MIMO': 'XIAOMI MIMO'
+    'XIAOMI MIMO': 'XIAOMI MIMO', 'Trae CN': 'Trae CN'
   }
   return map[provider] || provider
 }
@@ -184,6 +187,17 @@ function usageClass(pct) {
 function formatMoney(n, currency) {
   if (currency) return currency + Number(n || 0).toFixed(2)
   return '$' + Number(n || 0).toFixed(2)
+}
+
+function formatTokens(n) {
+  if (!n) return '0'
+  if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + 'M'
+  if (n >= 1_000) return (n / 1_000).toFixed(1) + 'K'
+  return n.toLocaleString()
+}
+// Trae 积分：显示真实数字（千分位），不使用 K/M 缩写
+function formatCredits(n) {
+  return Number(n || 0).toLocaleString()
 }
 
 async function confirmDelete() {
@@ -222,7 +236,7 @@ function startLoginPoll() {
       stopLoginPoll()
       return
     }
-    if ((!isDeepSeek.value && !isMimo.value) || !window.electronAPI?.getMonitorLoginStatus) return
+    if ((!isDeepSeek.value && !isMimo.value && !isTrae.value) || !window.electronAPI?.getMonitorLoginStatus) return
     try {
       const loggedIn = await window.electronAPI.getMonitorLoginStatus(vendor.value?.id)
       if (loggedIn) {
@@ -247,6 +261,8 @@ async function resetBudget() {
     let result
     if (isMimo.value) {
       result = await window.electronAPI.resetMimoBudget(vendor.value?.id)
+    } else if (isTrae.value) {
+      result = await window.electronAPI.resetTraeBudget(vendor.value?.id)
     } else {
       result = await window.electronAPI.resetDeepSeekBudget()
     }
@@ -255,6 +271,8 @@ async function resetBudget() {
       const id = vendor.value?.id
       if (result.data?.mimoBalances?.[id]) {
         balance.value = result.data.mimoBalances[id]
+      } else if (result.data?.traeBalances?.[id]) {
+        balance.value = result.data.traeBalances[id]
       } else if (result.data?.deepseekBalance) {
         balance.value = result.data.deepseekBalance
       }
@@ -295,7 +313,7 @@ async function resetBudget() {
         </button>
         <div class="topbar-right">
           <button
-            v-if="isDeepSeek || vendorType === 'Moonshot' || isMimo"
+            v-if="isDeepSeek || vendorType === 'Moonshot' || isMimo || isTrae"
             class="login-deepseek-btn"
             @click="loginDeepSeek"
             :disabled="loginLoading"
@@ -303,7 +321,7 @@ async function resetBudget() {
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/><polyline points="10 17 15 12 10 7"/><line x1="15" y1="12" x2="3" y2="12"/>
             </svg>
-            {{ loginLoading ? '打开中...' : (isLoggedIn ? '更换账户' : '登录 ' + (vendorType === 'Moonshot' ? 'Kimi' : isMimo ? 'MIMO' : 'DeepSeek')) }}
+            {{ loginLoading ? '打开中...' : (isLoggedIn ? '更换账户' : '登录 ' + (vendorType === 'Moonshot' ? 'Kimi' : isMimo ? 'MIMO' : isTrae ? 'Trae' : 'DeepSeek')) }}
           </button>
           <button class="delete-btn danger-btn" @click="showDeleteConfirm = true">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -316,7 +334,7 @@ async function resetBudget() {
 
       <!-- 厂商头部 -->
       <div class="vendor-header">
-        <div class="vendor-avatar" :style="(vendorType === 'DeepSeek' || vendorType === 'Moonshot' || vendor.provider === 'XIAOMI MIMO') ? {} : { backgroundColor: modelColor }">
+        <div class="vendor-avatar" :style="(vendorType === 'DeepSeek' || vendorType === 'Moonshot' || vendor.provider === 'XIAOMI MIMO' || vendor.provider === 'Trae CN') ? {} : { backgroundColor: modelColor }">
           <template v-if="vendorType === 'DeepSeek'">
             <img src="/deepseek.png" alt="DeepSeek" style="width: 52px; height: 52px; object-fit: contain;" />
           </template>
@@ -325,6 +343,9 @@ async function resetBudget() {
           </template>
           <template v-else-if="vendor.provider === 'XIAOMI MIMO'">
             <img src="/xiaomimimo.png" alt="XIAOMI MIMO" style="width: 52px; height: 52px; object-fit: contain;" />
+          </template>
+          <template v-else-if="vendor.provider === 'Trae CN'">
+            <img src="/trae.png" alt="Trae CN" style="width: 52px; height: 52px; object-fit: contain;" />
           </template>
           <template v-else-if="vendorType === 'OpenAI'">
             <svg width="28" height="28" viewBox="0 0 24 24" fill="none"><path d="M12 2a4 4 0 014 4v4a4 4 0 01-4 4 4 4 0 01-4-4V6a4 4 0 014-4z" fill="white" opacity="0.6"/><path d="M12 10a4 4 0 014 4v4a4 4 0 01-4 4 4 4 0 01-4-4v-4a4 4 0 014-4z" fill="white"/></svg>
@@ -377,19 +398,19 @@ async function resetBudget() {
             <circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/>
           </svg>
           <span class="hero-label">
-            {{ isPlan ? displayName + ' 账户余额' : '账户余额' }}
+            {{ isTrae ? displayName + ' 积分' : (isPlan ? displayName + ' 账户余额' : '账户余额') }}
           </span>
         </div>
 
         <div class="hero-numbers">
           <div class="hero-number-block">
-            <span class="hero-number">{{ formatMoney(allowanceData.remaining, allowanceData.currency) }}</span>
-            <span class="hero-number-unit">当前余额</span>
+            <span class="hero-number">{{ isTrae ? formatCredits(allowanceData.remaining) : formatMoney(allowanceData.remaining, allowanceData.currency) }}</span>
+            <span class="hero-number-unit">{{ isTrae ? '总剩余积分' : '当前余额' }}</span>
           </div>
           <div class="hero-divider"></div>
           <div class="hero-number-block">
-            <span class="hero-number">{{ formatMoney(allowanceData.totalBudget, allowanceData.currency) }}</span>
-            <span class="hero-number-unit">累计充值</span>
+            <span class="hero-number">{{ isTrae ? formatCredits(allowanceData.spent) : formatMoney(allowanceData.totalBudget, allowanceData.currency) }}</span>
+            <span class="hero-number-unit">{{ isTrae ? '累计消耗积分' : '累计充值' }}</span>
           </div>
         </div>
 
@@ -399,26 +420,26 @@ async function resetBudget() {
           </div>
           <div class="hero-bar-labels">
             <span>已用 {{ allowanceData.usedPercent }}%</span>
-            <span>{{ allowanceData.isAvailable ? '账户正常' : '账户异常' }}</span>
+            <span>{{ allowanceData.isAvailable ? (isTrae ? '积分可用' : '账户正常') : (isTrae ? '积分已耗尽' : '账户异常') }}</span>
           </div>
         </div>
 
         <div class="hero-footer">
           <div class="hero-foot-item">
             <span class="hf-label">已消费</span>
-            <span class="hf-value">{{ formatMoney(allowanceData.spent, allowanceData.currency) }}</span>
+            <span class="hf-value">{{ isTrae ? formatCredits(allowanceData.spent) + ' 积分' : formatMoney(allowanceData.spent, allowanceData.currency) }}</span>
           </div>
           <div class="hero-foot-item">
-            <span class="hf-label">{{ isDeepSeek ? '赠送余额' : (isMimo ? '累计充值' : '代金券') }}</span>
-            <span class="hf-value">{{ formatMoney(isDeepSeek ? (balance?.granted_balance || 0) : (isMimo ? (balance?.totalBudget || 0) : (balance?.voucher_balance || 0)), allowanceData.currency) }}</span>
+            <span class="hf-label">{{ isDeepSeek ? '赠送余额' : (isMimo ? '累计充值' : isTrae ? '通用积分' : '代金券') }}</span>
+            <span class="hf-value">{{ isTrae ? formatCredits(balance?.general?.remaining || 0) + ' 积分' : formatMoney(isDeepSeek ? (balance?.granted_balance || 0) : (isMimo ? (balance?.totalBudget || 0) : (balance?.voucher_balance || 0)), allowanceData.currency) }}</span>
           </div>
           <button
-            v-if="isDeepSeek || isMimo"
+            v-if="isDeepSeek || isMimo || isTrae"
             class="reset-btn"
             :class="{ loading: resetting }"
             :disabled="resetting"
             @click.stop="resetBudget"
-            title="将累计充值重置为当前余额，进度条归零"
+            :title="isTrae ? '将累计消耗积分重置为当前总积分，进度条归零' : '将累计充值重置为当前余额，进度条归零'"
           >
             <svg v-if="resetting" class="reset-spinner" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <path d="M21 12a9 9 0 1 1-6.219-8.56"/>
@@ -461,15 +482,15 @@ async function resetBudget() {
               <span class="detail-label">计费模式</span>
               <span class="detail-value">{{ isPlan ? 'Plan 订阅' : 'Token 按量计费' }}</span>
             </div>
-            <div class="detail-item">
+            <div class="detail-item" v-if="!isTrae">
               <span class="detail-label">当前余额</span>
               <span class="detail-value mono highlight">{{ formatMoney(allowanceData.remaining, allowanceData.currency) }}</span>
             </div>
-            <div class="detail-item">
+            <div class="detail-item" v-if="!isTrae">
               <span class="detail-label">累计充值</span>
               <span class="detail-value mono">{{ formatMoney(allowanceData.totalBudget, allowanceData.currency) }}</span>
             </div>
-            <div class="detail-item">
+            <div class="detail-item" v-if="!isTrae">
               <span class="detail-label">已消费</span>
               <span class="detail-value mono">{{ formatMoney(allowanceData.spent, allowanceData.currency) }}</span>
             </div>
@@ -480,13 +501,42 @@ async function resetBudget() {
             <div class="detail-item">
               <span class="detail-label">账户状态</span>
               <span class="detail-value" :class="allowanceData.isAvailable ? 'safe' : 'danger'">
-                {{ allowanceData.isAvailable ? '正常' : '异常' }}
+                {{ isTrae ? (allowanceData.isAvailable ? '可用' : '已耗尽') : (allowanceData.isAvailable ? '正常' : '异常') }}
               </span>
             </div>
-            <div class="detail-item detail-item-full">
+            <div class="detail-item detail-item-full" v-if="!isTrae">
               <span class="detail-label">{{ isDeepSeek ? '赠送余额' : '代金券余额' }}</span>
               <span class="detail-value mono">{{ formatMoney(isDeepSeek ? (balance?.granted_balance || 0) : (balance?.voucher_balance || 0), allowanceData.currency) }}</span>
             </div>
+
+            <!-- Trae CN 积分明细：通用积分 / Work 专属积分 -->
+            <template v-if="isTrae">
+              <div class="detail-item detail-item-full credit-section">
+                <span class="detail-label">通用积分</span>
+                <span class="detail-value mono highlight">{{ formatCredits(balance?.general?.remaining || 0) }} 积分</span>
+              </div>
+              <div class="detail-item">
+                <span class="detail-label">通用积分 · 总量</span>
+                <span class="detail-value mono">{{ formatCredits(balance?.general?.total || 0) }} 积分</span>
+              </div>
+              <div class="detail-item">
+                <span class="detail-label">通用积分 · 已消耗</span>
+                <span class="detail-value mono">{{ formatCredits(balance?.general?.spent || 0) }} 积分</span>
+              </div>
+              <div class="detail-item detail-item-full credit-section">
+                <span class="detail-label">Work 专属积分</span>
+                <span class="detail-value mono highlight">{{ formatCredits(balance?.work?.remaining || 0) }} 积分</span>
+              </div>
+              <div class="detail-item">
+                <span class="detail-label">Work 专属积分 · 总量</span>
+                <span class="detail-value mono">{{ formatCredits(balance?.work?.total || 0) }} 积分</span>
+              </div>
+              <div class="detail-item">
+                <span class="detail-label">Work 专属积分 · 已消耗</span>
+                <span class="detail-value mono">{{ formatCredits(balance?.work?.spent || 0) }} 积分</span>
+              </div>
+            </template>
+
             <div class="detail-item detail-item-full">
               <span class="detail-label">数据来源</span>
               <span class="detail-value">
@@ -624,6 +674,7 @@ async function resetBudget() {
 .detail-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
 .detail-item { background: #f8fafc; border-radius: 10px; padding: 1rem; display: flex; flex-direction: column; gap: 0.35rem; }
 .detail-item-full { grid-column: 1 / -1; }
+.credit-section { background: linear-gradient(135deg, #eef2ff, #f8fafc); border: 1px solid #e0e7ff; }
 .detail-label { font-size: 0.72rem; color: #94a3b8; font-weight: 500; }
 .detail-value { font-size: 0.875rem; color: #1e293b; font-weight: 600; }
 .detail-value.mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 0.8125rem; }

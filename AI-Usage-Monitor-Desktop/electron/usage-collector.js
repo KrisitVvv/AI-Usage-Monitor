@@ -884,6 +884,38 @@ function computeMimoBalance(raw, prevCache, vendorId) {
   }
 }
 
+// ---------- Trae CN 积分计算 ----------
+/**
+ * 计算 Trae CN 积分余额（无 API，数据来自 TraeMonitor 抓取的看板页面）：
+ * - raw.general / raw.work 分别包含 { remaining, total }
+ * - 总剩余积分 = 通用积分剩余 + Work专属积分剩余
+ * - 累计消耗积分 = (通用总量 - 通用剩余) + (Work总量 - Work剩余)
+ */
+function computeTraeBalance(raw, prevCache, vendorId) {
+  const general = raw?.general || { remaining: 0, total: 0 }
+  const work = raw?.work || { remaining: 0, total: 0 }
+
+  const generalSpent = Math.max(0, (general.total || 0) - (general.remaining || 0))
+  const workSpent = Math.max(0, (work.total || 0) - (work.remaining || 0))
+
+  const remaining = (general.remaining || 0) + (work.remaining || 0)
+  const spent = generalSpent + workSpent
+  const totalBudget = remaining + spent
+  const usedPercent = totalBudget > 0 ? Math.round((spent / totalBudget) * 100) : 0
+
+  return {
+    totalBudget,        // 总积分（剩余 + 已消耗）
+    remaining,           // 总剩余积分
+    spent,               // 累计消耗积分
+    usedPercent,
+    general: { remaining: general.remaining || 0, total: general.total || 0, spent: generalSpent },
+    work: { remaining: work.remaining || 0, total: work.total || 0, spent: workSpent },
+    currency: 'CREDIT',
+    is_available: remaining > 0,
+    fetchedAt: raw?.fetchedAt || new Date().toISOString()
+  }
+}
+
 function computeBalance(raw, prevCache, vendorId) {
   const balances = prevCache?.deepseekBalances || {}
   const prev = vendorId ? (balances[vendorId] || prevCache?.deepseekBalance || null) : (prevCache?.deepseekBalance || null)
@@ -1014,6 +1046,62 @@ async function resetMimoBudget(vendorId) {
   return cache
 }
 
+/**
+ * 重置 Trae CN 累计消耗积分为当前总积分
+ * 效果：spent = 0，进度条归零，后续消耗继续累加（与 DeepSeek/MIMO 初始化逻辑一致）
+ * Trae 无 API，积分来自 Monitor 解析结果（traeBalances 缓存）
+ */
+async function resetTraeBudget(vendorId) {
+  const vendorsPath = getUserDataPath(VENDORS_FILE_NAME)
+  if (!fs.existsSync(vendorsPath)) throw new Error('未找到供应商配置')
+
+  let vendors = []
+  try { vendors = JSON.parse(fs.readFileSync(vendorsPath, 'utf-8')) } catch { throw new Error('供应商配置文件损坏') }
+
+  const traeVendor = vendors.find(v => v.id === vendorId && (v.provider || '').toLowerCase().includes('trae'))
+  if (!traeVendor) throw new Error('未找到 Trae CN 配置')
+
+  const cache = readCache() || { vendors: [] }
+  const balance = cache.traeBalances?.[vendorId] || null
+  if (!balance || typeof balance.remaining !== 'number') {
+    throw new Error('暂无积分数据，请先登录 Trae 账户获取积分后再初始化')
+  }
+
+  // 构造新的积分余额：totalBudget = 当前总剩余积分 → 累计消耗 = 0
+  const remaining = balance.remaining
+  const generalRemaining = balance.general?.remaining || 0
+  const workRemaining = balance.work?.remaining || 0
+  const newBalance = {
+    totalBudget: remaining,
+    remaining,
+    spent: 0,
+    usedPercent: 0,
+    general: {
+      remaining: generalRemaining,
+      total: generalRemaining,
+      spent: 0
+    },
+    work: {
+      remaining: workRemaining,
+      total: workRemaining,
+      spent: 0
+    },
+    currency: 'CREDIT',
+    is_available: remaining > 0,
+    fetchedAt: new Date().toISOString(),
+    _reset: true
+  }
+
+  if (!cache.traeBalances) cache.traeBalances = {}
+  cache.traeBalances[vendorId] = newBalance
+  cache.traeBalance = Object.values(cache.traeBalances)[0] || null
+  cache.lastCollect = new Date().toISOString()
+  writeCache(cache)
+
+  console.log(`[Reset] Trae 积分已初始化: vendor=${vendorId}, totalBudget=${remaining}, spent=0`)
+  return cache
+}
+
 // ---------- 核心采集逻辑 ----------
 async function collectAll(kimiMonitorLoggedInMap = {}) {
   const vendorsPath = getUserDataPath(VENDORS_FILE_NAME)
@@ -1027,7 +1115,9 @@ async function collectAll(kimiMonitorLoggedInMap = {}) {
     kimiBalance: null,
     kimiBalances: {},
     mimoBalance: null,
-    mimoBalances: {}
+    mimoBalances: {},
+    traeBalance: null,
+    traeBalances: {}
   })
 
   if (!fs.existsSync(vendorsPath)) {
@@ -1094,9 +1184,11 @@ async function collectAll(kimiMonitorLoggedInMap = {}) {
       return emptyResult([], ['未找到可采集余额的供应商配置，请先添加供应商'])
     }
     const result = emptyResult(vendors)
-    // 保留 MIMO Monitor 写入的余额数据（该供应商无 API，仅通过 Monitor 采集）
+    // 保留 MIMO / Trae Monitor 写入的余额数据（这些供应商无 API，仅通过 Monitor 采集）
     result.mimoBalance = prevCache?.mimoBalance || null
     result.mimoBalances = prevCache?.mimoBalances || {}
+    result.traeBalance = prevCache?.traeBalance || null
+    result.traeBalances = prevCache?.traeBalances || {}
     return result
   }
 
@@ -1112,9 +1204,11 @@ async function collectAll(kimiMonitorLoggedInMap = {}) {
     deepseekBalances,
     kimiBalance: firstKimiBalance,
     kimiBalances,
-    // 透传 MIMO Monitor 写入的余额数据，避免被本轮 API 采集覆盖
+    // 透传 MIMO / Trae Monitor 写入的余额数据，避免被本轮 API 采集覆盖
     mimoBalance: prevCache?.mimoBalance || null,
     mimoBalances: prevCache?.mimoBalances || {},
+    traeBalance: prevCache?.traeBalance || null,
+    traeBalances: prevCache?.traeBalances || {},
     _raw: firstRaw
   }
   writeCache(cacheData)
@@ -1122,4 +1216,4 @@ async function collectAll(kimiMonitorLoggedInMap = {}) {
   return cacheData
 }
 
-module.exports = { collectAll, readCache, writeCache, recordTokenUsage, getTokenStats, resetDeepSeekBudget, resetMimoBudget, flushTokenStats, loadTokenStats, reloadTokenStats, recordHourlySnapshot, getPrevModelTokens, getTodayHourlyDeltas, getDailySummary, computeMimoBalance }
+module.exports = { collectAll, readCache, writeCache, recordTokenUsage, getTokenStats, resetDeepSeekBudget, resetMimoBudget, resetTraeBudget, flushTokenStats, loadTokenStats, reloadTokenStats, recordHourlySnapshot, getPrevModelTokens, getTodayHourlyDeltas, getDailySummary, computeMimoBalance, computeTraeBalance }

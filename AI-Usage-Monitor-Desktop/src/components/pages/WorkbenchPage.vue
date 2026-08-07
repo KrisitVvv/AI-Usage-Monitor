@@ -48,6 +48,7 @@ const vendors = ref([])
 const balance = ref(null)
 const kimiBalances = ref({})
 const mimoBalances = ref({})
+const traeBalances = ref({})
 
 // 4. 模型颜色映射（所有供应商的模型统一管理）
 const MODEL_COLORS = {
@@ -137,6 +138,11 @@ function toggleTokenNumberMode() {
 const formatFullNumber = (value) => {
   if (!value) return '0'
   return String(value)
+}
+
+// Trae 积分：显示真实数字（千分位），不使用缩写
+const formatCredits = (value) => {
+  return Number(value || 0).toLocaleString()
 }
 
 // 按当前模式格式化 Token 消耗量
@@ -435,17 +441,20 @@ const modelUsageAndQuotas = computed(() => {
     const providerShort = vendorName.replace(/\s*API$/i, '').trim() || vendorName
     const displayName = v.customName || providerShort
 
-    // 使用 balance 数据（DeepSeek 用全局余额，Kimi/MIMO 按 vendorId 取余额）
+    // 使用 balance 数据（DeepSeek 用全局余额，Kimi/MIMO/Trae 按 vendorId 取余额）
     const isDeepSeek = vendorName.toLowerCase().includes('deepseek')
     const isKimi = vendorName.toLowerCase().includes('kimi')
     const isMimo = vendorName.toLowerCase().includes('mimo')
-    const vendorBal = isDeepSeek ? bal : (isKimi ? (kimiBalances.value[v.id] || null) : (isMimo ? (mimoBalances.value[v.id] || null) : null))
+    const isTrae = vendorName.toLowerCase().includes('trae')
+    const vendorBal = isDeepSeek ? bal : (isKimi ? (kimiBalances.value[v.id] || null) : (isMimo ? (mimoBalances.value[v.id] || null) : (isTrae ? (traeBalances.value[v.id] || null) : null)))
     const isCurrentVendor = !!vendorBal
     const budget = isCurrentVendor ? (vendorBal.totalBudget || 0) : 0
     const remaining = isCurrentVendor ? (vendorBal.remaining || 0) : 0
     const spent = isCurrentVendor ? (vendorBal.spent || 0) : 0
     const usedPercent = isCurrentVendor ? (vendorBal.usedPercent || 0) : 0
     const currency = vendorBal?.currency === 'CNY' ? '¥' : '$'
+    // Trae 积分显示：真实数字 + "积分"后缀；其他供应商仍为金额格式
+    const unit = isTrae ? '积分' : currency
 
     list.push({
       id: v.id,
@@ -453,12 +462,13 @@ const modelUsageAndQuotas = computed(() => {
       name: displayName,
       type: providerShort,
       billingModel: v.billingMode || v.billingModel || 'plan',
+      isTrae: isTrae,
       usedTokens: spent,
-      usedTokensFormatted: budget > 0 ? `${currency}${spent.toFixed(2)}` : '0',
+      usedTokensFormatted: isTrae ? formatCredits(spent) : budget > 0 ? `${currency}${spent.toFixed(2)}` : '0',
       plans: [{ limit: budget > 0 ? budget : 1000000 }],
       remaining: remaining,
       budget: budget,
-      unit: currency,
+      unit: unit,
       status: usedPercent >= 90 ? 'danger' : usedPercent >= 75 ? 'warning' : 'safe',
       apiKey: v.apiKey ? '***' + v.apiKey.slice(-4) : '',
       _live: isCurrentVendor && !vendorBal?._stale
@@ -636,6 +646,7 @@ onMounted(async () => {
         balance.value = usageData.deepseekBalance || null
         kimiBalances.value = usageData.kimiBalances || {}
         mimoBalances.value = usageData.mimoBalances || {}
+        traeBalances.value = usageData.traeBalances || {}
       }
     } catch (e) {
       console.warn('[Workbench] 加载用量数据失败:', e.message)
@@ -656,6 +667,7 @@ onMounted(async () => {
       balance.value = data.deepseekBalance || null
       kimiBalances.value = data.kimiBalances || {}
       mimoBalances.value = data.mimoBalances || {}
+      traeBalances.value = data.traeBalances || {}
     })
   } else {
     // tokenStatsError.value = '运行环境不支持（非 Electron）' // 已禁用
@@ -759,6 +771,7 @@ onUnmounted(() => {
                   <span v-if="model.provider?.toLowerCase().includes('deepseek')" class="model-logo"><img class="vendor-logo-img" src="/deepseek.png" alt="DeepSeek" /></span>
                   <span v-else-if="model.provider?.toLowerCase().includes('kimi')" class="model-logo"><img class="vendor-logo-img" src="/kimi.png" alt="Kimi" /></span>
                   <span v-else-if="model.provider?.toLowerCase().includes('mimo')" class="model-logo"><img class="vendor-logo-img" src="/xiaomimimo.png" alt="XIAOMI MIMO" /></span>
+                  <span v-else-if="model.provider?.toLowerCase().includes('trae')" class="model-logo"><img class="vendor-logo-img" src="/trae.png" alt="Trae CN" /></span>
                   <span v-else class="model-badge" :class="model.type?.toLowerCase() + '-badge' || 'default-badge'">{{ model.type || 'API' }}</span>
                   <span class="model-name-text">{{ model.name }}</span>
                   <span v-if="model._live" class="live-badge">实时</span>
@@ -766,7 +779,7 @@ onUnmounted(() => {
               </div>
               <div class="progress-bars">
                 <div class="progress-row" v-if="model.budget > 0">
-                  <span class="progress-label">余额</span>
+                  <span class="progress-label">{{ model.isTrae ? '积分' : '余额' }}</span>
                   <div class="progress-track-wrap">
                     <div class="progress-track">
                       <div
@@ -774,11 +787,14 @@ onUnmounted(() => {
                         :style="{ width: Math.min((model.budget - model.remaining) / model.budget * 100, 100) + '%' }"
                       ></div>
                     </div>
-                    <span class="progress-text">{{ model.unit }}{{ (model.remaining || 0).toFixed(2) }} / {{ model.unit }}{{ (model.budget || 0).toFixed(2) }}</span>
+                    <span class="progress-text">
+                      <template v-if="model.isTrae">{{ (model.remaining || 0).toFixed(2) }} / {{ (model.budget || 0).toFixed(2) }}</template>
+                      <template v-else>{{ model.unit }}{{ (model.remaining || 0).toFixed(2) }} / {{ model.unit }}{{ (model.budget || 0).toFixed(2) }}</template>
+                    </span>
                   </div>
                 </div>
                 <div class="progress-row" v-else>
-                  <span class="progress-label">余额</span>
+                  <span class="progress-label">{{ model.isTrae ? '积分' : '余额' }}</span>
                   <div class="progress-track-wrap">
                     <div class="progress-track">
                       <div class="progress-fill billing" style="width:0%"></div>

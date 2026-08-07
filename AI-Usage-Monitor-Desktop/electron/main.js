@@ -8,7 +8,8 @@ const { spawn } = require('child_process')
 const { DeepSeekMonitor } = require('./deepseek-monitor')
 const { KimiMonitor } = require('./kimi-monitor')
 const MimoMonitor = require('./mimo-monitor')
-const { collectAll, recordTokenUsage, getTokenStats, resetDeepSeekBudget, resetMimoBudget, flushTokenStats, loadTokenStats, reloadTokenStats, recordHourlySnapshot, getPrevModelTokens } = require('./usage-collector')
+const TraeMonitor = require('./trae-monitor')
+const { collectAll, recordTokenUsage, getTokenStats, resetDeepSeekBudget, resetMimoBudget, resetTraeBudget, flushTokenStats, loadTokenStats, reloadTokenStats, recordHourlySnapshot, getPrevModelTokens } = require('./usage-collector')
 const Scheduler = require('./scheduler')
 
 // ===== 模型名校验 =====
@@ -191,6 +192,7 @@ const scheduler = new Scheduler()
 const dsMonitors = new Map() // vendorId → DeepSeekMonitor
 const kmiMonitors = new Map() // vendorId → KimiMonitor
 const mimoMonitors = new Map() // vendorId → MimoMonitor
+const traeMonitors = new Map() // vendorId → TraeMonitor
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -326,6 +328,13 @@ app.whenReady().then(() => {
     }
   }, 60000)
 
+  // Trae 积分60秒轮询（与 MIMO 保持一致）
+  setInterval(() => {
+    for (const [, monitor] of traeMonitors) {
+      monitor.refreshBalanceOnly().catch(() => {})
+    }
+  }, 60000)
+
   ipcMain.on('window-minimize', (event) => {
     BrowserWindow.fromWebContents(event.sender)?.minimize()
   })
@@ -370,9 +379,9 @@ app.whenReady().then(() => {
     // 新增供应商后立即触发一次采集
     scheduler.collectBalance()
 
-    // 如果是 DeepSeek / Kimi / XIAOMI MIMO 供应商，确保监听器已启动
+    // 如果是 DeepSeek / Kimi / XIAOMI MIMO / Trae CN 供应商，确保监听器已启动
     const prov = (newVendor.provider || '').toLowerCase()
-    if (prov.includes('deepseek') || prov.includes('kimi') || prov.includes('mimo')) {
+    if (prov.includes('deepseek') || prov.includes('kimi') || prov.includes('mimo') || prov.includes('trae')) {
       ensureMonitors()
     }
 
@@ -473,6 +482,27 @@ app.whenReady().then(() => {
       }
     }
 
+    // 如果是 Trae CN 供应商，清理对应的监控实例和浏览器 session
+    if ((deletedVendor.provider || '').toLowerCase().includes('trae')) {
+      const monitor = traeMonitors.get(vendorId)
+      if (monitor) {
+        monitor.stop()
+        traeMonitors.delete(vendorId)
+        scheduler.unregisterMonitor(vendorId)
+        console.log(`[Main] 已停止并移除供应商 ${vendorId} 的 Trae 监控实例`)
+      }
+      try {
+        const { session } = require('electron')
+        const ses = session.fromPartition(`persist:trae-${vendorId}`)
+        await ses.clearStorageData({
+          storages: ['cookies', 'localstorage', 'caches', 'serviceworkers']
+        })
+        console.log(`[Main] 已清除供应商 ${vendorId} 的 Trae session 数据`)
+      } catch (e) {
+        console.warn(`[Main] 清除 Trae session 失败:`, e.message)
+      }
+    }
+
     // 立即更新缓存并推送前端，不等待异步采集
     try {
       const { readCache, writeCache } = require('./usage-collector')
@@ -483,6 +513,7 @@ app.whenReady().then(() => {
         if (cache.deepseekBalances) delete cache.deepseekBalances[vendorId]
         if (cache.kimiBalances) delete cache.kimiBalances[vendorId]
         if (cache.mimoBalances) delete cache.mimoBalances[vendorId]
+        if (cache.traeBalances) delete cache.traeBalances[vendorId]
         // 所有供应商已删除时，清除缓存的余额数据，防止前端显示幽灵条目
         if (vendors.length === 0) {
           delete cache.deepseekBalance
@@ -491,6 +522,8 @@ app.whenReady().then(() => {
           delete cache.kimiBalances
           delete cache.mimoBalance
           delete cache.mimoBalances
+          delete cache.traeBalance
+          delete cache.traeBalances
         }
         writeCache(cache)
         mainWindow?.webContents.send('usage-data-updated', cache)
@@ -544,12 +577,13 @@ app.whenReady().then(() => {
     return vendors.some(v => (v.provider || '').toLowerCase().includes('deepseek'))
   }
 
-  // 为每个 DeepSeek / Kimi / XIAOMI MIMO vendor 创建独立的监控实例（隔离 session）
+  // 为每个 DeepSeek / Kimi / XIAOMI MIMO / Trae CN vendor 创建独立的监控实例（隔离 session）
   function ensureMonitors() {
     const vendors = readVendors()
     const deepseekVendors = vendors.filter(v => (v.provider || '').toLowerCase().includes('deepseek'))
     const kimiVendors = vendors.filter(v => (v.provider || '').toLowerCase().includes('kimi'))
     const mimoVendors = vendors.filter(v => (v.provider || '').toLowerCase().includes('mimo'))
+    const traeVendors = vendors.filter(v => (v.provider || '').toLowerCase().includes('trae'))
 
     // 启动缺失的 DeepSeek 监控
     for (const v of deepseekVendors) {
@@ -620,6 +654,30 @@ app.whenReady().then(() => {
         console.log(`[Main] 移除供应商 ${vendorId} 的 MIMO 监控实例`)
       }
     }
+
+    // 启动缺失的 Trae CN 监控
+    for (const v of traeVendors) {
+      if (!traeMonitors.has(v.id)) {
+        const monitor = new TraeMonitor(v.id)
+        monitor.onLoginStatusChanged = broadcastLoginStatus
+        monitor.start(traeMonitorCallback)
+        traeMonitors.set(v.id, monitor)
+        scheduler.registerMonitor(v.id, monitor)
+        console.log(`[Main] 为供应商 ${v.customName || v.id} 创建 Trae 监控实例`)
+        // 立即触发一次解析，不等待 scheduler 的10分钟轮询
+        setTimeout(() => monitor.refreshNow(), 2000)
+      }
+    }
+
+    // 停止已删除供应商的 Trae CN 监控
+    for (const [vendorId, monitor] of traeMonitors) {
+      if (!traeVendors.find(v => v.id === vendorId)) {
+        monitor.stop()
+        traeMonitors.delete(vendorId)
+        scheduler.unregisterMonitor(vendorId)
+        console.log(`[Main] 移除供应商 ${vendorId} 的 Trae 监控实例`)
+      }
+    }
   }
 
   // 获取指定 vendorId 的监控实例，或获取任意一个
@@ -627,8 +685,9 @@ app.whenReady().then(() => {
     if (vendorId && dsMonitors.has(vendorId)) return dsMonitors.get(vendorId)
     if (vendorId && kmiMonitors.has(vendorId)) return kmiMonitors.get(vendorId)
     if (vendorId && mimoMonitors.has(vendorId)) return mimoMonitors.get(vendorId)
+    if (vendorId && traeMonitors.has(vendorId)) return traeMonitors.get(vendorId)
     // fallback: 返回第一个
-    return dsMonitors.values().next().value || kmiMonitors.values().next().value || mimoMonitors.values().next().value || null
+    return dsMonitors.values().next().value || kmiMonitors.values().next().value || mimoMonitors.values().next().value || traeMonitors.values().next().value || null
   }
 
   function getKimiMonitorLoginMap() {
@@ -654,49 +713,18 @@ app.whenReady().then(() => {
 
     const data = payload.data
 
-    // 1. 标准 chat completion 响应格式
+    // 1. 标准 chat completion 响应格式（看板内部 API 拦截，与 DOM 解析同源）
+    // 方案B：数字统计仅保留 DOM 看板路径（dom-usage，与柱状图同口径），
+    // API 拦截数据不再写入统计，避免同一看板数据被双重计数导致"今日总量"偏大。
     if (data && data.usage) {
-      const record = {
-        model: data.model || data.id?.split('-')[0] || 'unknown',
-        requestId: data.id || '',
-        promptTokens: data.usage.prompt_tokens || 0,
-        completionTokens: data.usage.completion_tokens || 0,
-        totalTokens: data.usage.total_tokens || 0,
-        completionDetails: data.usage.completion_tokens_details || null,
-        timestamp: payload.timestamp,
-        vendorId: payload.vendorId
-      }
-      const stats = recordTokenUsage(record)
-      if (stats) {
-        mainWindow?.webContents.send('token-stats-updated', stats)
-      }
+      console.log(`[Main] 跳过 API 拦截 chat 用量数据（与 DOM 看板同源，避免重复计数）: model=${data.model || '?'}`)
       return
     }
 
     // 2. DeepSeek v0 API 批量用量数据 (by_api_key/amount)
+    // 同上：该 JSON 与页面 DOM 渲染的是同一份看板用量，不再写入统计
     if (data && data.data && Array.isArray(data.data)) {
-      let hasNewData = false
-      for (const item of data.data) {
-        if (item && (item.amount || item.usage || item.total_tokens)) {
-          const totalTokens = item.amount || item.total_tokens || item.usage?.total_tokens || 0
-          if (totalTokens > 0) {
-            const record = {
-              model: item.model || item.api_key_name || 'deepseek-chat',
-              requestId: '',
-              promptTokens: item.prompt_tokens || item.usage?.prompt_tokens || 0,
-              completionTokens: item.completion_tokens || item.usage?.completion_tokens || 0,
-              totalTokens,
-              timestamp: item.created_at ? item.created_at * 1000 : payload.timestamp,
-              vendorId: payload.vendorId
-            }
-            recordTokenUsage(record)
-            hasNewData = true
-          }
-        }
-      }
-      if (hasNewData) {
-        mainWindow?.webContents.send('token-stats-updated', getTokenStats())
-      }
+      console.log(`[Main] 跳过 API 拦截批量用量数据（与 DOM 看板同源，避免重复计数）: ${data.data.length} 条`)
       return
     }
 
@@ -882,6 +910,36 @@ app.whenReady().then(() => {
     console.log('[Main] 未处理的 MIMO 数据格式:', payload.type)
   }
 
+  // Trae CN 监听器数据回调：看板解析的积分数据 → 写入缓存并推送前端
+  const traeMonitorCallback = (payload) => {
+    console.log(`[Main] Trae 监听器收到数据: ${payload.type} from ${payload.url}`)
+
+    const data = payload.data
+
+    // trae-credits: XPath 解析的积分数据（通用积分 + Work专属积分）
+    if (payload.type === 'trae-credits' && data) {
+      try {
+        const { readCache, writeCache, computeTraeBalance } = require('./usage-collector')
+        const cache = readCache() || { vendors: [] }
+        const balance = computeTraeBalance(data, cache, payload.vendorId)
+        if (!cache.traeBalances) cache.traeBalances = {}
+        cache.traeBalances[payload.vendorId] = balance
+        // 兼容：全局 traeBalance 取第一个 vendor 的 balance
+        const firstTrae = Object.values(cache.traeBalances)[0]
+        cache.traeBalance = firstTrae || null
+        cache.lastCollect = new Date().toISOString()
+        writeCache(cache)
+        mainWindow?.webContents.send('usage-data-updated', cache)
+        console.log(`[Main] Trae 积分已更新: vendor=${payload.vendorId} remaining=${balance.remaining} spent=${balance.spent}`)
+      } catch (e) {
+        console.error('[Main] Trae 积分写入失败:', e.message)
+      }
+      return
+    }
+
+    console.log('[Main] 未处理的 Trae 数据格式:', payload.type)
+  }
+
   ensureMonitors()
 
   // 暴露监听器状态查询（支持 vendorId 参数路由到对应监控实例）
@@ -956,6 +1014,20 @@ app.whenReady().then(() => {
       mainWindow?.webContents.send('usage-data-updated', data)
       // 初始化后触发一次实时刷新，让后续数据尽快更新
       const monitor = mimoMonitors.get(vendorId)
+      if (monitor) setTimeout(() => monitor.refreshNow(), 300)
+      return { success: true, data }
+    } catch (e) {
+      return { success: false, error: e.message }
+    }
+  })
+
+  // 重置 Trae CN 累计消耗积分
+  ipcMain.handle('reset-trae-budget', async (_event, vendorId) => {
+    try {
+      const data = await resetTraeBudget(vendorId)
+      mainWindow?.webContents.send('usage-data-updated', data)
+      // 初始化后触发一次实时刷新，让后续数据尽快更新
+      const monitor = traeMonitors.get(vendorId)
       if (monitor) setTimeout(() => monitor.refreshNow(), 300)
       return { success: true, data }
     } catch (e) {
@@ -1278,6 +1350,8 @@ app.on('window-all-closed', () => {
   kmiMonitors.clear()
   for (const [, monitor] of mimoMonitors) monitor.stop()
   mimoMonitors.clear()
+  for (const [, monitor] of traeMonitors) monitor.stop()
+  traeMonitors.clear()
   if (process.platform !== 'darwin') app.quit()
 })
 
@@ -1291,7 +1365,8 @@ app.on('before-quit', (event) => {
   const stopPromises = [
     ...[...dsMonitors.values()].map(m => m.stop()),
     ...[...kmiMonitors.values()].map(m => m.stop()),
-    ...[...mimoMonitors.values()].map(m => m.stop())
+    ...[...mimoMonitors.values()].map(m => m.stop()),
+    ...[...traeMonitors.values()].map(m => m.stop())
   ]
   Promise.all(stopPromises).then(() => {
     flushTokenStats()

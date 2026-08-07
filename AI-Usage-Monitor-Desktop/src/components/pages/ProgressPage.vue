@@ -27,7 +27,7 @@ function shortName(provider) {
     'DeepSeek API': 'DeepSeek', 'OpenAI API': 'OpenAI', 'Kimi CN': 'KIMI',
     'Aliyun API': '阿里云', '智谱 AI': 'GLM', 'Anthropic': 'Claude',
     'Google AI': 'Gemini', 'Stability AI': 'SDXL', '百度文心': '文心', '科大讯飞': '讯飞',
-    'XIAOMI MIMO': 'XIAOMI MIMO'
+    'XIAOMI MIMO': 'XIAOMI MIMO', 'Trae CN': 'Trae CN'
   }
   return map[provider] || provider
 }
@@ -37,7 +37,8 @@ const mergedModelList = computed(() => {
   const balances = {
     ...(realtimeUsage.value.deepseekBalances || {}),
     ...(realtimeUsage.value.kimiBalances || {}),
-    ...(realtimeUsage.value.mimoBalances || {})
+    ...(realtimeUsage.value.mimoBalances || {}),
+    ...(realtimeUsage.value.traeBalances || {})
   }
   const fallbackBalance = realtimeUsage.value.deepseekBalance
   const savedVendors = realtimeUsage.value.vendors || []
@@ -47,11 +48,12 @@ const mergedModelList = computed(() => {
     const isDeepSeek = v.provider === 'DeepSeek API'
     const isKimi = v.provider === 'Kimi CN'
     const isMimo = v.provider === 'XIAOMI MIMO'
+    const isTrae = v.provider === 'Trae CN'
     // 按 vendor ID 查找 balance，DeepSeek/MIMO 额外支持全局 fallback
     const balanceData = balances[v.id] || (isDeepSeek ? fallbackBalance : null) || (isMimo ? realtimeUsage.value.mimoBalance : null)
     const hasBalance = !!balanceData
-    // DeepSeek/Kimi/MIMO 供应商：Monitor 报告已登录时视为实时（即使 balance 尚未刷新）
-    const monitorLoggedIn = !!(isDeepSeek || isKimi || isMimo) && !!monitorLoginStatus.value[v.id]
+    // DeepSeek/Kimi/MIMO/Trae 供应商：Monitor 报告已登录时视为实时（即使 balance 尚未刷新）
+    const monitorLoggedIn = !!(isDeepSeek || isKimi || isMimo || isTrae) && !!monitorLoginStatus.value[v.id]
     const base = {
       id: v.id,
       name: v.customName || shortName(v.provider),
@@ -71,14 +73,28 @@ const mergedModelList = computed(() => {
       const usedPercent = balanceData.usedPercent ?? (totalBudget > 0 ? Math.round((spent / totalBudget) * 100) : 0)
 
       if (v.billingModel === 'plan') {
-        base.allowance = {
-          planName: `${base.name} 余额`,
-          remainingTokens: remaining,
-          planTokensTotal: totalBudget,
-          planTokensUsed: spent,
-          planCost: `¥${totalBudget.toFixed(2)}`,
-          usedPercent,
-          nextRenewal: '—'
+        if (isTrae) {
+          // Trae CN 积分：外部卡片仅展示累计消耗积分与总剩余积分
+          base.allowance = {
+            planName: '总剩余积分',
+            remainingTokens: remaining,   // 总剩余积分
+            planTokensTotal: totalBudget, // 总积分（剩余 + 已消耗）
+            planTokensUsed: spent,        // 累计消耗积分
+            planCost: '',
+            usedPercent,
+            nextRenewal: '—',
+            currency: 'CREDIT'
+          }
+        } else {
+          base.allowance = {
+            planName: `${base.name} 余额`,
+            remainingTokens: remaining,
+            planTokensTotal: totalBudget,
+            planTokensUsed: spent,
+            planCost: `¥${totalBudget.toFixed(2)}`,
+            usedPercent,
+            nextRenewal: '—'
+          }
         }
       } else {
         base.allowance = {
@@ -147,6 +163,10 @@ function formatTokens(n) {
   if (n >= 1_000) return (n / 1_000).toFixed(1) + 'K'
   return n.toLocaleString()
 }
+// Trae 积分：显示真实数字（千分位），不使用 K/M 缩写
+function formatCredits(n) {
+  return Number(n || 0).toLocaleString()
+}
 function formatMoney(n, currency) {
   if (currency) return currency + Number(n || 0).toFixed(2)
   return '$' + Number(n || 0).toFixed(2)
@@ -159,7 +179,7 @@ function usageClass(pct) {
 
 // ---------- 登录状态管理 ----------
 function isMonitorVendor(provider) {
-  return provider === 'DeepSeek API' || provider === 'Kimi CN' || provider === 'XIAOMI MIMO'
+  return provider === 'DeepSeek API' || provider === 'Kimi CN' || provider === 'XIAOMI MIMO' || provider === 'Trae CN'
 }
 
 async function pollLoginStatus() {
@@ -277,6 +297,9 @@ onUnmounted(() => {
               <div v-else-if="m.provider === 'XIAOMI MIMO'" class="vendor-avatar vendor-avatar-img">
                 <img class="vendor-logo-img" src="/xiaomimimo.png" alt="XIAOMI MIMO" />
               </div>
+              <div v-else-if="m.provider === 'Trae CN'" class="vendor-avatar vendor-avatar-img">
+                <img class="vendor-logo-img" src="/trae.png" alt="Trae CN" />
+              </div>
               <div v-else class="vendor-avatar" :style="{ backgroundColor: m.color }">
                 <span class="avatar-letter">{{ m.name.charAt(0) }}</span>
               </div>
@@ -303,6 +326,13 @@ onUnmounted(() => {
                     {{ formatMoney(m.allowance.remainingTokens, '¥') }} / {{ formatMoney(m.allowance.planTokensTotal, '¥') }}
                   </span>
                 </template>
+                <!-- Trae CN 积分：总剩余积分 / 总积分 -->
+                <template v-else-if="m.provider === 'Trae CN' && m._live">
+                  <span class="allowance-label">总剩余积分</span>
+                  <span class="allowance-value">
+                    {{ formatCredits(m.allowance.remainingTokens) }} / {{ formatCredits(m.allowance.planTokensTotal) }} 积分
+                  </span>
+                </template>
                 <template v-else>
                   <span class="allowance-label">{{ m.allowance.planName }}</span>
                   <span class="allowance-value">
@@ -321,14 +351,17 @@ onUnmounted(() => {
                 <span v-if="(m.provider === 'DeepSeek API' || m.provider === 'XIAOMI MIMO') && m._live" class="allowance-status">
                   {{ m._deepseekAvailable ? '正常' : '异常' }}
                 </span>
+                <span v-else-if="m.provider === 'Trae CN' && m._live" class="allowance-status">
+                  {{ m.allowance.remainingTokens > 0 ? '可用' : '已耗尽' }}
+                </span>
                 <span v-else>下次续费 {{ m.allowance.nextRenewal }}</span>
               </div>
             </div>
 
             <div class="card-meta">
               <div class="meta-slot">
-                <span class="meta-label">订阅费用</span>
-                <span class="meta-value mono">{{ m.allowance.planCost }}</span>
+                <span class="meta-label">{{ m.provider === 'Trae CN' ? '累计消耗' : '订阅费用' }}</span>
+                <span class="meta-value mono">{{ m.provider === 'Trae CN' ? formatCredits(m.allowance.planTokensUsed) + ' 积分' : m.allowance.planCost }}</span>
               </div>
               <div class="meta-slot">
                 <span class="meta-label">状态</span>
@@ -363,6 +396,9 @@ onUnmounted(() => {
               </div>
               <div v-else-if="m.provider === 'XIAOMI MIMO'" class="vendor-avatar vendor-avatar-img">
                 <img class="vendor-logo-img" src="/xiaomimimo.png" alt="XIAOMI MIMO" />
+              </div>
+              <div v-else-if="m.provider === 'Trae CN'" class="vendor-avatar vendor-avatar-img">
+                <img class="vendor-logo-img" src="/trae.png" alt="Trae CN" />
               </div>
               <div v-else class="vendor-avatar" :style="{ backgroundColor: m.color }">
                 <span class="avatar-letter">{{ m.name.charAt(0) }}</span>

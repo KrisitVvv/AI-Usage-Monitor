@@ -45,6 +45,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // ---------- 重置 XIAOMI MIMO 累计预算 ----------
   resetMimoBudget: (vendorId) => ipcRenderer.invoke('reset-mimo-budget', vendorId),
 
+  // ---------- 重置 Trae CN 累计消耗积分 ----------
+  resetTraeBudget: (vendorId) => ipcRenderer.invoke('reset-trae-budget', vendorId),
+
   // ---------- DeepSeek 用量页面监听器（支持 vendorId 隔离多账号） ----------
   getMonitorStatus: (vendorId) => ipcRenderer.invoke('get-monitor-status', vendorId),
   getMonitorLoginStatus: (vendorId) => ipcRenderer.invoke('get-monitor-login-status', vendorId),
