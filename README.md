@@ -24,6 +24,7 @@ The AI usage monitor can get Deepseek,Kimi,GLM.Qwen and so on model's API usage 
 | DeepSeek API | ❌    | ✅     | ✅                    | ✅                |
 | Kimi CN      | ❌    | ✅     | ✅                    | ✅                |
 | XIAOMI MIMO  | ❌    | ✅     | ✅                    | ✅                |
+| TRAE CN      | ✅    | ❌     | ✅                    | ❌                |
 
 ## 快速构建 Quick Build
 
